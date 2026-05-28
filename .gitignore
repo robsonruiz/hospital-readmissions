@@ -1,0 +1,29 @@
+data/
+*.csv
+
+# Virtual environments
+.venv/
+venv/
+.venv/Lib/site-packages/_polars_runtime_32/_polars_runtime.pyd
+.venv/Lib/site-packages/xgboost/lib/xgboost.dll
+
+# Python
+__pycache__/
+*.pyc
+
+# Data
+data/raw/
+data/processed/
+*.csv
+*.parquet
+*.duckdb
+
+# Jupyter
+.ipynb_checkpoints/
+
+# VS Code
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
