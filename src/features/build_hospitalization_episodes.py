@@ -1,8 +1,11 @@
 import duckdb
 
 def build_hospitalization_episodes():
+    conn = duckdb.connect(
+        "data/hospital_readmissions.duckdb"
+    )
 
-    conn = duckdb.connect("data/hospital_readmissions.duckdb")
+    print("Creating hospitalization episodes...")
 
     conn.execute("""
         CREATE OR REPLACE TABLE hospitalization_episodes AS
@@ -12,25 +15,44 @@ def build_hospitalization_episodes():
             datahorainternacao,
             MAX(datahoraalta) AS datahoraalta,
             MAX(datasolicitacao) AS last_update,
-
             ANY_VALUE(sexo) AS sexo,
-            ANY_VALUE(especialidade) AS especialidade,
-            ANY_VALUE(tipoleito) AS tipoleito,
-            ANY_VALUE(carater) AS carater,
-            ANY_VALUE(codigocid) AS codigocid,
-            ANY_VALUE(motivoalta) AS motivoalta
-
+            ANY_VALUE(municipiosolicitante)
+                AS municipiosolicitante,
+            ANY_VALUE(municipioresidencia)
+                AS municipioresidencia,
+            ANY_VALUE(municipioexecutante)
+                AS municipioexecutante,
+            ANY_VALUE(executante)
+                AS executante,
+            ANY_VALUE(especialidade)
+                AS especialidade,
+            ANY_VALUE(tipoleito)
+                AS tipoleito,
+            ANY_VALUE(carater)
+                AS carater,
+            ANY_VALUE(codigocid)
+                AS codigocid,
+            ANY_VALUE(motivoalta)
+                AS motivoalta
         FROM hospitalizations
 
-        WHERE datahorainternacao <> 'SEM DATAHORA INTERNAÇÃO'
+        WHERE
+            datahorainternacao IS NOT NULL
+            AND datahorainternacao <> 'SEM DATAHORA INTERNAÇÃO'
 
         GROUP BY
             identificador,
             datahorainternacao
     """)
 
-    conn.close()
+    total = conn.execute("""
+        SELECT COUNT(*)
+        FROM hospitalization_episodes
+    """).fetchone()[0]
 
+    print(f"Episodes created: {total:,}")
+
+    conn.close()
 
 if __name__ == "__main__":
     build_hospitalization_episodes()

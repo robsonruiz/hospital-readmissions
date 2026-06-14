@@ -1,43 +1,11 @@
 import duckdb
 
+
 def build_readmission_target():
 
-    conn = duckdb.connect("data/hospital_readmissions.duckdb")
-
-    print("Creating hospitalization episodes...")
-
-    conn.execute("""
-        CREATE OR REPLACE TABLE hospitalization_episodes AS
-
-        SELECT
-            identificador,
-            sexo,
-            especialidade,
-            tipoleito,
-            carater,
-            codigocid,
-            motivoalta,
-
-            datahorainternacao,
-            MAX(datahoraalta) AS datahoraalta,
-            MAX(datasolicitacao) AS last_update
-
-        FROM hospitalizations
-
-        WHERE
-            datahorainternacao IS NOT NULL
-            AND datahorainternacao <> 'SEM DATAHORA INTERNAÇÃO'
-
-        GROUP BY
-            identificador,
-            sexo,
-            especialidade,
-            tipoleito,
-            carater,
-            codigocid,
-            motivoalta,
-            datahorainternacao
-    """)
+    conn = duckdb.connect(
+        "data/hospital_readmissions.duckdb"
+    )
 
     print("Creating clean episode table...")
 
@@ -54,6 +22,7 @@ def build_readmission_target():
             ) AS admission_ts,
 
             CASE
+
                 WHEN datahoraalta IS NULL
                     OR datahoraalta = 'SEM DATAHORAALTA'
                 THEN NULL
@@ -62,6 +31,7 @@ def build_readmission_target():
                     datahoraalta,
                     '%d/%m/%Y %H:%M:%S'
                 )
+
             END AS discharge_ts
 
         FROM hospitalization_episodes
@@ -150,34 +120,10 @@ def build_readmission_target():
     print("\nReadmission target distribution:")
     print(summary)
 
-    comparison = conn.execute("""
-        SELECT
-            SUM(readmitted_30d_raw) AS raw_readmissions,
-            SUM(readmitted_30d_clean) AS clean_readmissions
-        FROM hospitalization_target
-    """).fetchdf()
-
-    print("\nRaw vs Clean target:")
-    print(comparison)
-
-    total = conn.execute("""
-        SELECT COUNT(*)
-        FROM hospitalization_target
-    """).fetchone()[0]
-
-    positives = conn.execute("""
-        SELECT COUNT(*)
-        FROM hospitalization_target
-        WHERE readmitted_30d_clean = 1
-    """).fetchone()[0]
-
-    print(f"\nTotal episodes: {total:,}")
-    print(f"Readmissions within 30 days (clean): {positives:,}")
-    print(f"Rate: {(positives / total) * 100:.2f}%")
-
     conn.close()
 
     print("\nTarget creation completed.")
+
 
 if __name__ == "__main__":
     build_readmission_target()
