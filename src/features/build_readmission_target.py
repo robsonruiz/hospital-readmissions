@@ -67,43 +67,27 @@ def build_readmission_target():
                 next_admission_ts
             ) AS days_until_next_admission,
 
-            CASE
+        CASE
 
-                WHEN next_admission_ts IS NULL
-                    THEN 0
+            WHEN motivoalta = 'Óbito'
+                THEN 0
 
-                WHEN discharge_ts IS NULL
-                    THEN 0
+            WHEN next_admission_ts IS NULL
+                THEN 0
 
-                WHEN DATEDIFF(
-                    'day',
-                    discharge_ts,
-                    next_admission_ts
-                ) BETWEEN 0 AND 30
-                    THEN 1
+            WHEN discharge_ts IS NULL
+                THEN 0
 
-                ELSE 0
+            WHEN DATEDIFF(
+                'day',
+                discharge_ts,
+                next_admission_ts
+            ) BETWEEN 2 AND 30
+                THEN 1
 
-            END AS readmitted_30d_raw,
+            ELSE 0
 
-            CASE
-
-                WHEN next_admission_ts IS NULL
-                    THEN 0
-
-                WHEN discharge_ts IS NULL
-                    THEN 0
-
-                WHEN DATEDIFF(
-                    'day',
-                    discharge_ts,
-                    next_admission_ts
-                ) BETWEEN 2 AND 30
-                    THEN 1
-
-                ELSE 0
-
-            END AS readmitted_30d_clean
+        END AS readmitted_30d_clean
 
         FROM ordered_admissions
     """)
