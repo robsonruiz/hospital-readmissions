@@ -13,7 +13,6 @@ def build_readmission_target():
         CREATE OR REPLACE TABLE hospitalization_episodes_clean AS
 
         SELECT
-
             *,
 
             STRPTIME(
@@ -22,7 +21,6 @@ def build_readmission_target():
             ) AS admission_ts,
 
             CASE
-
                 WHEN datahoraalta IS NULL
                     OR datahoraalta = 'SEM DATAHORAALTA'
                 THEN NULL
@@ -31,7 +29,6 @@ def build_readmission_target():
                     datahoraalta,
                     '%d/%m/%Y %H:%M:%S'
                 )
-
             END AS discharge_ts
 
         FROM hospitalization_episodes
@@ -45,51 +42,108 @@ def build_readmission_target():
         WITH ordered_admissions AS (
 
             SELECT
-
                 *,
 
                 LEAD(admission_ts) OVER (
                     PARTITION BY identificador
                     ORDER BY admission_ts
-                ) AS next_admission_ts
+                ) AS next_admission_ts,
+
+                LEAD(executante) OVER (
+                    PARTITION BY identificador
+                    ORDER BY admission_ts
+                ) AS next_executante,
+
+                LEAD(municipioexecutante) OVER (
+                    PARTITION BY identificador
+                    ORDER BY admission_ts
+                ) AS next_municipioexecutante
 
             FROM hospitalization_episodes_clean
+        ),
 
+        target_logic AS (
+
+            SELECT
+                *,
+
+                DATEDIFF(
+                    'day',
+                    discharge_ts,
+                    next_admission_ts
+                ) AS days_until_next_admission,
+
+                CASE
+                    WHEN motivoalta = 'Transferência'
+                    THEN 1
+                    ELSE 0
+                END AS is_transfer_discharge,
+
+                CASE
+                    WHEN motivoalta = 'Óbito'
+                    THEN 1
+                    ELSE 0
+                END AS is_death_discharge,
+
+                CASE
+                    WHEN motivoalta = 'Encerramento administrativo'
+                    THEN 1
+                    ELSE 0
+                END AS is_administrative_closure
+
+            FROM ordered_admissions
         )
 
         SELECT
-
             *,
 
-            DATEDIFF(
-                'day',
-                discharge_ts,
-                next_admission_ts
-            ) AS days_until_next_admission,
+            CASE
+                WHEN next_admission_ts IS NULL
+                    THEN 0
 
-        CASE
+                WHEN discharge_ts IS NULL
+                    THEN 0
 
-            WHEN motivoalta = 'Óbito'
-                THEN 0
+                WHEN is_death_discharge = 1
+                    THEN 0
 
-            WHEN next_admission_ts IS NULL
-                THEN 0
+                WHEN is_transfer_discharge = 1
+                    THEN 0
 
-            WHEN discharge_ts IS NULL
-                THEN 0
+                WHEN is_administrative_closure = 1
+                    THEN 0
 
-            WHEN DATEDIFF(
-                'day',
-                discharge_ts,
-                next_admission_ts
-            ) BETWEEN 2 AND 30
-                THEN 1
+                WHEN days_until_next_admission BETWEEN 0 AND 30
+                    THEN 1
 
-            ELSE 0
+                ELSE 0
 
-        END AS readmitted_30d_clean
+            END AS readmitted_30d_raw,
 
-        FROM ordered_admissions
+            CASE
+                WHEN next_admission_ts IS NULL
+                    THEN 0
+
+                WHEN discharge_ts IS NULL
+                    THEN 0
+
+                WHEN is_death_discharge = 1
+                    THEN 0
+
+                WHEN is_transfer_discharge = 1
+                    THEN 0
+
+                WHEN is_administrative_closure = 1
+                    THEN 0
+
+                WHEN days_until_next_admission BETWEEN 2 AND 30
+                    THEN 1
+
+                ELSE 0
+
+            END AS readmitted_30d_clean
+
+        FROM target_logic
     """)
 
     summary = conn.execute("""
@@ -103,6 +157,48 @@ def build_readmission_target():
 
     print("\nReadmission target distribution:")
     print(summary)
+
+    comparison = conn.execute("""
+        SELECT
+            SUM(readmitted_30d_raw) AS raw_readmissions,
+            SUM(readmitted_30d_clean) AS clean_readmissions
+        FROM hospitalization_target
+    """).fetchdf()
+
+    print("\nRaw vs Clean target:")
+    print(comparison)
+
+    excluded = conn.execute("""
+        SELECT
+            motivoalta,
+            COUNT(*) AS episodes
+        FROM hospitalization_target
+        WHERE motivoalta IN (
+            'Transferência',
+            'Óbito',
+            'Encerramento administrativo'
+        )
+        GROUP BY motivoalta
+        ORDER BY episodes DESC
+    """).fetchdf()
+
+    print("\nExcluded discharge reasons:")
+    print(excluded)
+
+    total = conn.execute("""
+        SELECT COUNT(*)
+        FROM hospitalization_target
+    """).fetchone()[0]
+
+    positives = conn.execute("""
+        SELECT COUNT(*)
+        FROM hospitalization_target
+        WHERE readmitted_30d_clean = 1
+    """).fetchone()[0]
+
+    print(f"\nTotal episodes: {total:,}")
+    print(f"Readmissions within 30 days clean: {positives:,}")
+    print(f"Rate: {(positives / total) * 100:.2f}%")
 
     conn.close()
 
