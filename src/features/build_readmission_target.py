@@ -83,13 +83,7 @@ def build_readmission_target():
                     WHEN motivoalta = 'Óbito'
                     THEN 1
                     ELSE 0
-                END AS is_death_discharge,
-
-                CASE
-                    WHEN motivoalta = 'Encerramento administrativo'
-                    THEN 1
-                    ELSE 0
-                END AS is_administrative_closure
+                END AS is_death_discharge
 
             FROM ordered_admissions
         )
@@ -110,9 +104,6 @@ def build_readmission_target():
                 WHEN is_transfer_discharge = 1
                     THEN 0
 
-                WHEN is_administrative_closure = 1
-                    THEN 0
-
                 WHEN days_until_next_admission BETWEEN 0 AND 30
                     THEN 1
 
@@ -131,9 +122,6 @@ def build_readmission_target():
                     THEN 0
 
                 WHEN is_transfer_discharge = 1
-                    THEN 0
-
-                WHEN is_administrative_closure = 1
                     THEN 0
 
                 WHEN days_until_next_admission BETWEEN 2 AND 30
@@ -175,8 +163,7 @@ def build_readmission_target():
         FROM hospitalization_target
         WHERE motivoalta IN (
             'Transferência',
-            'Óbito',
-            'Encerramento administrativo'
+            'Óbito'
         )
         GROUP BY motivoalta
         ORDER BY episodes DESC
