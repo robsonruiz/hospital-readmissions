@@ -15,10 +15,28 @@ def build_readmission_target():
         SELECT
             *,
 
-            STRPTIME(
-                datahorainternacao,
-                '%d/%m/%Y %H:%M:%S'
-            ) AS admission_ts,
+            CASE
+                WHEN YEAR(
+                    STRPTIME(datahorainternacao, '%d/%m/%Y %H:%M:%S')
+                ) = 2004
+                THEN STRPTIME(
+                    REPLACE(datahorainternacao, '2004', '2024'),
+                    '%d/%m/%Y %H:%M:%S'
+                )
+
+                WHEN YEAR(
+                    STRPTIME(datahorainternacao, '%d/%m/%Y %H:%M:%S')
+                ) = 2013
+                THEN STRPTIME(
+                    REPLACE(datahorainternacao, '2013', '2023'),
+                    '%d/%m/%Y %H:%M:%S'
+                )
+
+                ELSE STRPTIME(
+                    datahorainternacao,
+                    '%d/%m/%Y %H:%M:%S'
+                )
+            END AS admission_ts
 
             CASE
                 WHEN datahoraalta IS NULL
