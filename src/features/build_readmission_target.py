@@ -16,8 +16,21 @@ def build_readmission_target():
             *,
 
             CASE
+                WHEN identificador = (
+                    '504ac34ff10ba0c69bd09d503dfe942d'
+                    '7576b8a843f0152b9b5e67d92bcffa65'
+                )
+                AND datahorainternacao = '12/11/2022 07:08:00'
+                THEN STRPTIME(
+                    '12/11/2025 07:08:00',
+                    '%d/%m/%Y %H:%M:%S'
+                )
+
                 WHEN YEAR(
-                    STRPTIME(datahorainternacao, '%d/%m/%Y %H:%M:%S')
+                    STRPTIME(
+                        datahorainternacao,
+                        '%d/%m/%Y %H:%M:%S'
+                    )
                 ) = 2004
                 THEN STRPTIME(
                     REPLACE(datahorainternacao, '2004', '2024'),
@@ -25,7 +38,10 @@ def build_readmission_target():
                 )
 
                 WHEN YEAR(
-                    STRPTIME(datahorainternacao, '%d/%m/%Y %H:%M:%S')
+                    STRPTIME(
+                        datahorainternacao,
+                        '%d/%m/%Y %H:%M:%S'
+                    )
                 ) = 2013
                 THEN STRPTIME(
                     REPLACE(datahorainternacao, '2013', '2023'),
@@ -36,7 +52,7 @@ def build_readmission_target():
                     datahorainternacao,
                     '%d/%m/%Y %H:%M:%S'
                 )
-            END AS admission_ts
+            END AS admission_ts,
 
             CASE
                 WHEN datahoraalta IS NULL
@@ -57,27 +73,76 @@ def build_readmission_target():
     conn.execute("""
         CREATE OR REPLACE TABLE hospitalization_target AS
 
-        WITH ordered_admissions AS (
+        WITH current_episodes AS (
+
+            SELECT
+                ROW_NUMBER() OVER (
+                    ORDER BY identificador, admission_ts, discharge_ts
+                ) AS episode_id,
+
+                *
+
+            FROM hospitalization_episodes_clean
+        ),
+
+        future_candidates AS (
+
+            SELECT
+                current_episode.episode_id,
+
+                future_episode.admission_ts AS candidate_admission_ts,
+                future_episode.executante AS candidate_executante,
+                future_episode.municipioexecutante
+                    AS candidate_municipioexecutante
+
+            FROM current_episodes AS current_episode
+
+            LEFT JOIN hospitalization_episodes_clean AS future_episode
+
+                ON future_episode.identificador =
+                    current_episode.identificador
+
+                AND current_episode.discharge_ts IS NOT NULL
+
+                AND future_episode.admission_ts >
+                    current_episode.discharge_ts
+        ),
+
+        ranked_candidates AS (
 
             SELECT
                 *,
 
-                LEAD(admission_ts) OVER (
-                    PARTITION BY identificador
-                    ORDER BY admission_ts
-                ) AS next_admission_ts,
+                ROW_NUMBER() OVER (
+                    PARTITION BY episode_id
+                    ORDER BY candidate_admission_ts NULLS LAST
+                ) AS candidate_order
 
-                LEAD(executante) OVER (
-                    PARTITION BY identificador
-                    ORDER BY admission_ts
-                ) AS next_executante,
+            FROM future_candidates
+        ),
 
-                LEAD(municipioexecutante) OVER (
-                    PARTITION BY identificador
-                    ORDER BY admission_ts
-                ) AS next_municipioexecutante
+        episodes_with_next_admission AS (
 
-            FROM hospitalization_episodes_clean
+            SELECT
+                current_episode.* EXCLUDE (episode_id),
+
+                candidate.candidate_admission_ts
+                    AS next_admission_ts,
+
+                candidate.candidate_executante
+                    AS next_executante,
+
+                candidate.candidate_municipioexecutante
+                    AS next_municipioexecutante
+
+            FROM current_episodes AS current_episode
+
+            LEFT JOIN ranked_candidates AS candidate
+
+                ON current_episode.episode_id =
+                    candidate.episode_id
+
+                AND candidate.candidate_order = 1
         ),
 
         target_logic AS (
@@ -103,7 +168,7 @@ def build_readmission_target():
                     ELSE 0
                 END AS is_death_discharge
 
-            FROM ordered_admissions
+            FROM episodes_with_next_admission
         )
 
         SELECT
@@ -126,7 +191,6 @@ def build_readmission_target():
                     THEN 1
 
                 ELSE 0
-
             END AS readmitted_30d_raw,
 
             CASE
@@ -146,11 +210,29 @@ def build_readmission_target():
                     THEN 1
 
                 ELSE 0
-
             END AS readmitted_30d_clean
 
         FROM target_logic
     """)
+    
+    clean_count = conn.execute("""
+        SELECT COUNT(*)
+        FROM hospitalization_episodes_clean
+    """).fetchone()[0]
+
+    target_count = conn.execute("""
+        SELECT COUNT(*)
+        FROM hospitalization_target
+    """).fetchone()[0]
+
+    print(f"\nClean episodes: {clean_count:,}")
+    print(f"Target episodes: {target_count:,}")
+
+    if clean_count != target_count:
+        raise ValueError(
+            "Episode count changed while creating the target: "
+            f"{clean_count:,} -> {target_count:,}"
+        )
 
     summary = conn.execute("""
         SELECT
