@@ -37,7 +37,8 @@ def build_analytics_dataset():
             discharge_ts,
 
             readmitted_30d_clean,
-
+            eligible_for_readmission_model,
+            
             DATEDIFF(
                 'day',
                 admission_ts,

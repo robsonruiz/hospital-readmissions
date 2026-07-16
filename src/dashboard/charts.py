@@ -537,16 +537,62 @@ def plot_icd_codes(df, top_n=20):
 # Discharge Reason
 # ==========================================================
 
-def plot_discharge_reason(df, min_episodes=100, top_n=20):
+def plot_discharge_reason(
+    df: pd.DataFrame,
+    min_episodes: int = 100
+) -> None:
+    """
+    Taxa de reinternação por motivo de alta,
+    considerando apenas episódios elegíveis.
+    """
+
+    required_columns = {
+        "motivoalta",
+        "readmitted_30d_clean",
+        "eligible_for_readmission_model"
+    }
+
+    if not required_columns.issubset(df.columns):
+        st.info(
+            "Required columns for discharge reason chart "
+            "were not found."
+        )
+        return
+
+    eligible_df = df[
+        df["eligible_for_readmission_model"] == 1
+    ].copy()
 
     discharge = (
-        df.groupby("motivoalta")
+        eligible_df
+        .assign(
+            motivoalta=eligible_df["motivoalta"]
+            .fillna("Não informado")
+        )
+        .groupby("motivoalta", dropna=False)
         .agg(
-            episodes=("readmitted_30d_clean", "count"),
-            readmissions=("readmitted_30d_clean", "sum")
+            episodes=(
+                "readmitted_30d_clean",
+                "size"
+            ),
+            readmissions=(
+                "readmitted_30d_clean",
+                "sum"
+            )
         )
         .reset_index()
     )
+
+    discharge = discharge[
+        discharge["episodes"] >= min_episodes
+    ].copy()
+
+    if discharge.empty:
+        st.info(
+            "No eligible discharge reasons satisfy "
+            "the minimum episode filter."
+        )
+        return
 
     discharge["rate"] = (
         discharge["readmissions"]
@@ -554,20 +600,10 @@ def plot_discharge_reason(df, min_episodes=100, top_n=20):
         * 100
     )
 
-    discharge = discharge[
-        discharge["episodes"] >= min_episodes
-    ]
-
     discharge = discharge.sort_values(
         "rate",
-        ascending=False
-    ).head(top_n)
-
-    if discharge.empty:
-        st.info("No discharge reason data available.")
-        return
-
-    overall_rate = df["readmitted_30d_clean"].mean() * 100
+        ascending=True
+    )
 
     fig = px.bar(
         discharge,
@@ -575,29 +611,235 @@ def plot_discharge_reason(df, min_episodes=100, top_n=20):
         y="motivoalta",
         orientation="h",
         text="episodes",
-        title="Readmission Rate by Discharge Reason",
+        title=(
+            "Readmission Rate by Eligible "
+            "Discharge Reason"
+        ),
         labels={
-            "rate": "Readmission Rate (%)",
-            "motivoalta": "Discharge Reason"
+            "rate": "Readmission rate (%)",
+            "motivoalta": "Discharge reason",
+            "episodes": "Episodes",
+            "readmissions": "Readmissions"
+        },
+        hover_data={
+            "episodes": ":,",
+            "readmissions": ":,",
+            "rate": ":.2f"
         }
     )
 
-    fig.update_traces(textposition="outside")
-
-    fig.add_vline(
-        x=overall_rate,
-        line_dash="dash",
-        annotation_text=f"Overall ({overall_rate:.1f}%)"
+    fig.update_traces(
+        texttemplate="%{text:,}",
+        textposition="outside"
     )
 
     fig.update_layout(
-        yaxis={"categoryorder": "total ascending"},
-        height=500
+        height=450,
+        yaxis_title=None
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(
+        fig,
+        use_container_width=True
+    )
 
+    st.caption(
+        "Episodes ending in death, transfer, or without "
+        "a valid discharge date are not included because "
+        "they are not eligible to originate a future "
+        "readmission."
+    )
 
+def plot_discharge_reason_distribution(
+    df: pd.DataFrame
+) -> None:
+    """
+    Distribuição dos motivos de alta em todos os episódios.
+    """
+
+    if "motivoalta" not in df.columns:
+        st.info("Column motivoalta not found.")
+        return
+
+    discharge_distribution = (
+        df.assign(
+            motivoalta=df["motivoalta"]
+            .fillna("Não informado")
+        )
+        .groupby("motivoalta", dropna=False)
+        .size()
+        .reset_index(name="episodes")
+        .sort_values(
+            "episodes",
+            ascending=True
+        )
+    )
+
+    if discharge_distribution.empty:
+        st.info(
+            "No discharge reason data available."
+        )
+        return
+
+    fig = px.bar(
+        discharge_distribution,
+        x="episodes",
+        y="motivoalta",
+        orientation="h",
+        text="episodes",
+        title="Distribution of Discharge Reasons",
+        labels={
+            "episodes": "Episodes",
+            "motivoalta": "Discharge reason"
+        }
+    )
+
+    fig.update_traces(
+        texttemplate="%{text:,}",
+        textposition="outside"
+    )
+
+    fig.update_layout(
+        height=500,
+        yaxis_title=None
+    )
+
+    st.plotly_chart(
+        fig,
+        use_container_width=True
+    )
+
+def plot_model_eligibility(
+    df: pd.DataFrame
+) -> None:
+
+    if "eligible_for_readmission_model" not in df.columns:
+        st.info(
+            "Eligibility column not found."
+        )
+        return
+
+    eligibility = (
+        df["eligible_for_readmission_model"]
+        .map({
+            1: "Eligible",
+            0: "Not eligible"
+        })
+        .fillna("Unknown")
+        .value_counts()
+        .rename_axis("status")
+        .reset_index(name="episodes")
+    )
+
+    if eligibility.empty:
+        st.info("No eligibility data available.")
+        return
+
+    fig = px.pie(
+        eligibility,
+        names="status",
+        values="episodes",
+        hole=0.45,
+        title="Eligibility for Readmission Prediction"
+    )
+
+    fig.update_traces(
+        textinfo="percent+label",
+        hovertemplate=(
+            "%{label}<br>"
+            "Episodes: %{value:,}<br>"
+            "Percentage: %{percent}"
+            "<extra></extra>"
+        )
+    )
+
+    st.plotly_chart(
+        fig,
+        use_container_width=True
+    )
+
+def plot_non_eligible_reasons(
+    df: pd.DataFrame
+) -> None:
+
+    required_columns = {
+        "eligible_for_readmission_model",
+        "motivoalta",
+        "discharge_ts"
+    }
+
+    if not required_columns.issubset(df.columns):
+        st.info(
+            "Required columns for model eligibility "
+            "chart were not found."
+        )
+        return
+
+    excluded_df = df[
+        df["eligible_for_readmission_model"] == 0
+    ].copy()
+
+    if excluded_df.empty:
+        st.info(
+            "No non-eligible episodes found."
+        )
+        return
+
+    excluded_df["exclusion_reason"] = "Other"
+
+    excluded_df.loc[
+        excluded_df["motivoalta"].eq("Óbito"),
+        "exclusion_reason"
+    ] = "Death"
+
+    excluded_df.loc[
+        excluded_df["motivoalta"].eq("Transferência"),
+        "exclusion_reason"
+    ] = "Transfer"
+
+    excluded_df.loc[
+        excluded_df["discharge_ts"].isna(),
+        "exclusion_reason"
+    ] = "Missing discharge"
+
+    exclusion_summary = (
+        excluded_df
+        .groupby("exclusion_reason")
+        .size()
+        .reset_index(name="episodes")
+        .sort_values(
+            "episodes",
+            ascending=True
+        )
+    )
+
+    fig = px.bar(
+        exclusion_summary,
+        x="episodes",
+        y="exclusion_reason",
+        orientation="h",
+        text="episodes",
+        title="Reasons for Model Ineligibility",
+        labels={
+            "episodes": "Episodes",
+            "exclusion_reason": "Reason"
+        }
+    )
+
+    fig.update_traces(
+        texttemplate="%{text:,}",
+        textposition="outside"
+    )
+
+    fig.update_layout(
+        yaxis_title=None
+    )
+
+    st.plotly_chart(
+        fig,
+        use_container_width=True
+    )
+    
 # ==========================================================
 # Heatmap Hospital x Specialty
 # ==========================================================
@@ -712,3 +954,134 @@ def plot_previous_hospitalizations(df):
     fig.update_layout(height=500)
 
     st.plotly_chart(fig, use_container_width=True)
+
+def plot_discharge_outcomes(df):
+
+    if "motivoalta" not in df.columns:
+        st.info("Column motivoalta not found.")
+        return
+
+    outcomes = (
+        df.assign(
+            motivoalta=df["motivoalta"]
+            .fillna("Não informado")
+        )
+        .groupby("motivoalta")
+        .size()
+        .reset_index(name="episodes")
+        .sort_values(
+            "episodes",
+            ascending=False
+        )
+    )
+
+    if outcomes.empty:
+        st.info("No discharge outcome data available.")
+        return
+
+    fig = px.bar(
+        outcomes,
+        x="episodes",
+        y="motivoalta",
+        orientation="h",
+        text="episodes",
+        title="Hospital Episodes by Discharge Outcome",
+        labels={
+            "episodes": "Episodes",
+            "motivoalta": "Discharge outcome"
+        }
+    )
+
+    fig.update_traces(
+        textposition="outside"
+    )
+
+    fig.update_layout(
+        yaxis={
+            "categoryorder": "total ascending"
+        },
+        height=500
+    )
+
+    st.plotly_chart(
+        fig,
+        use_container_width=True
+    )
+
+def plot_deaths_by_hospital(
+    df,
+    min_episodes=100,
+    top_n=20
+):
+
+    hospital_summary = (
+        df.groupby("executante")
+        .agg(
+            episodes=(
+                "motivoalta",
+                "count"
+            ),
+            deaths=(
+                "motivoalta",
+                lambda values: (
+                    values == "Óbito"
+                ).sum()
+            )
+        )
+        .reset_index()
+    )
+
+    hospital_summary = hospital_summary[
+        hospital_summary["episodes"]
+        >= min_episodes
+    ].copy()
+
+    hospital_summary["death_rate"] = (
+        hospital_summary["deaths"]
+        / hospital_summary["episodes"]
+        * 100
+    )
+
+    hospital_summary = (
+        hospital_summary
+        .sort_values(
+            "death_rate",
+            ascending=False
+        )
+        .head(top_n)
+    )
+
+    if hospital_summary.empty:
+        st.info(
+            "No hospitals satisfy the minimum episode filter."
+        )
+        return
+
+    fig = px.bar(
+        hospital_summary,
+        x="death_rate",
+        y="executante",
+        orientation="h",
+        text="episodes",
+        title="In-Hospital Mortality by Hospital",
+        labels={
+            "death_rate": "Mortality (%)",
+            "executante": "Hospital"
+        }
+    )
+
+    fig.update_traces(
+        textposition="outside"
+    )
+
+    fig.update_layout(
+        yaxis={
+            "categoryorder": "total ascending"
+        },
+        height=600
+    )
+
+    st.plotly_chart(
+        fig,
+        use_container_width=True
+    )

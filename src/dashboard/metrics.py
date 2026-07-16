@@ -40,6 +40,40 @@ def show_metrics(df: pd.DataFrame):
         .mean()
     )
 
+    deaths = int(
+        df["motivoalta"]
+        .fillna("")
+        .eq("Óbito")
+        .sum()
+    )
+
+    transfers = int(
+        df["motivoalta"]
+        .fillna("")
+        .eq("Transferência")
+        .sum()
+    )
+
+    eligible_df = df[
+        df["eligible_for_readmission_model"] == 1
+    ].copy()
+
+    eligible_episodes = len(eligible_df)
+
+    eligible_readmissions = int(
+        eligible_df["readmitted_30d_clean"]
+        .fillna(0)
+        .sum()
+    )
+
+    eligible_readmission_rate = (
+        eligible_readmissions
+        / eligible_episodes
+        * 100
+        if eligible_episodes > 0
+        else 0
+    )
+
     c1, c2, c3 = st.columns(3)
 
     with c1:
@@ -94,6 +128,30 @@ def show_metrics(df: pd.DataFrame):
         st.metric(
             "Patients Readmitted",
             f"{df.loc[df['readmitted_30d_clean'] == 1].shape[0]:,}"
+        )
+
+    k4, k5, k6 = st.columns(3)
+
+    with k4:
+        st.metric(
+            "Deaths",
+            f"{deaths:,}"
+        )
+
+    with k5:
+        st.metric(
+            "Transfers",
+            f"{transfers:,}"
+        )
+
+    with k6:
+        st.metric(
+            "Eligible Readmission Rate",
+            f"{eligible_readmission_rate:.2f}%",
+            help=(
+                f"{eligible_readmissions:,} readmissions among "
+                f"{eligible_episodes:,} eligible episodes."
+            )
         )
 
     st.divider()

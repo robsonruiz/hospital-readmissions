@@ -12,6 +12,10 @@ from charts import (
     plot_los_vs_readmission,
     plot_icd_codes,
     plot_discharge_reason,
+    plot_discharge_reason_distribution,
+    plot_model_eligibility,
+    plot_non_eligible_reasons,
+    plot_deaths_by_hospital,
     plot_heatmap,
     plot_previous_hospitalizations
 )
@@ -83,14 +87,37 @@ def main():
     with c8:
         plot_discharge_reason(
             df,
-            min_episodes=min_episodes,
-            top_n=top_n
+            min_episodes=min_episodes
+        )
+   
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        plot_discharge_reason_distribution(
+            df
+        )
+
+    with col2:
+        plot_model_eligibility(
+            df
+        )
+
+    with col3:
+        plot_non_eligible_reasons(
+            df
         )
 
     c9, c10 = st.columns(2)
 
     with c9:
         plot_previous_hospitalizations(df)
+
+    with c10:
+        plot_deaths_by_hospital(
+            df,
+            min_episodes=min_episodes,
+            top_n=top_n
+        )
 
     plot_heatmap(
         df,

@@ -92,7 +92,16 @@ def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
             .fillna(0)
             .astype(int)
         )
-
+   
+    if "eligible_for_readmission_model" in df.columns:
+        df["eligible_for_readmission_model"] = (
+            pd.to_numeric(
+                df["eligible_for_readmission_model"],
+                errors="coerce"
+            )
+            .fillna(0)
+            .astype(int)
+        )
     # -----------------------------
     # Datetime columns
     # -----------------------------
