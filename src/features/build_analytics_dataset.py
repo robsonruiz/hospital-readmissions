@@ -1,209 +1,181 @@
 import duckdb
 
 
-def build_analytics_dataset():
+DATABASE_PATH = "data/hospital_readmissions.duckdb"
 
-    conn = duckdb.connect(
-        "data/hospital_readmissions.duckdb"
-    )
 
-    print("Creating analytics dataset...")
+def build_analytics_dataset() -> None:
+    conn = duckdb.connect(DATABASE_PATH)
 
-    conn.execute("""
-    CREATE OR REPLACE TABLE ml_features AS
+    try:
+        print("Creating analytics dataset...")
 
-    WITH base AS (
+        conn.execute("""
+            CREATE OR REPLACE TABLE ml_features AS
 
-        SELECT
+            WITH history AS (
+                SELECT
+                    identificador,
+                    sexo,
+                    municipiosolicitante,
+                    municipioresidencia,
+                    municipioexecutante,
+                    executante,
+                    especialidade,
+                    tipoleito,
+                    carater,
+                    codigocid,
+                    motivoalta,
+                    admission_ts,
+                    discharge_ts,
+                    eligible_for_readmission_model,
+                    unplanned_readmitted_30d,
 
-            identificador,
+                    DATEDIFF(
+                        'day',
+                        admission_ts,
+                        discharge_ts
+                    ) AS length_of_stay_days,
 
-            sexo,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY identificador
+                        ORDER BY admission_ts
+                    ) - 1 AS previous_hospitalizations,
 
-            municipiosolicitante,
-            municipioresidencia,
-            municipioexecutante,
+                    LAG(discharge_ts) OVER (
+                        PARTITION BY identificador
+                        ORDER BY admission_ts
+                    ) AS previous_discharge_ts,
 
-            executante,
+                    COALESCE(
+                        SUM(
+                            COALESCE(
+                                unplanned_readmitted_30d,
+                                0
+                            )
+                        ) OVER (
+                            PARTITION BY identificador
+                            ORDER BY admission_ts
+                            ROWS BETWEEN UNBOUNDED PRECEDING
+                                AND 1 PRECEDING
+                        ),
+                        0
+                    ) AS previous_unplanned_readmissions,
 
-            especialidade,
-            tipoleito,
-            carater,
+                    COUNT(*) OVER (
+                        PARTITION BY identificador
+                        ORDER BY admission_ts
+                        RANGE BETWEEN INTERVAL 30 DAY PRECEDING
+                            AND INTERVAL 1 MICROSECOND PRECEDING
+                    ) AS admissions_last_30d,
 
-            codigocid,
-            motivoalta,
+                    COUNT(*) OVER (
+                        PARTITION BY identificador
+                        ORDER BY admission_ts
+                        RANGE BETWEEN INTERVAL 90 DAY PRECEDING
+                            AND INTERVAL 1 MICROSECOND PRECEDING
+                    ) AS admissions_last_90d,
 
-            admission_ts,
-            discharge_ts,
+                    COUNT(*) OVER (
+                        PARTITION BY identificador
+                        ORDER BY admission_ts
+                        RANGE BETWEEN INTERVAL 365 DAY PRECEDING
+                            AND INTERVAL 1 MICROSECOND PRECEDING
+                    ) AS admissions_last_365d
 
-            readmitted_30d_clean,
-            eligible_for_readmission_model,
-            
-            DATEDIFF(
-                'day',
-                admission_ts,
-                discharge_ts
-            ) AS length_of_stay_days,
+                FROM hospitalization_target
+            )
 
-            ROW_NUMBER() OVER (
-                PARTITION BY identificador
-                ORDER BY admission_ts
-            ) - 1 AS previous_hospitalizations,
-
-            LAG(discharge_ts) OVER (
-                PARTITION BY identificador
-                ORDER BY admission_ts
-            ) AS previous_discharge_ts,
-
-            COALESCE(
-                SUM(readmitted_30d_clean) OVER (
-                    PARTITION BY identificador
-                    ORDER BY admission_ts
-                    ROWS BETWEEN UNBOUNDED PRECEDING
-                    AND 1 PRECEDING
+            SELECT
+                * EXCLUDE (
+                    eligible_for_readmission_model,
+                    unplanned_readmitted_30d,
+                    previous_discharge_ts
                 ),
-                0
-            ) AS previous_readmissions
 
-        FROM hospitalization_target
-
-    ),
-
-    features AS (
-
-        SELECT
-
-            *,
-
-            CASE
-
-                WHEN previous_discharge_ts IS NULL
-                THEN NULL
-
-                ELSE DATEDIFF(
+                DATEDIFF(
                     'day',
                     previous_discharge_ts,
                     admission_ts
-                )
+                ) AS days_since_previous_hospitalization,
 
-            END AS days_since_previous_hospitalization,
+                DATE_TRUNC(
+                    'month',
+                    admission_ts
+                ) AS admission_month,
 
-            CASE
+                YEAR(admission_ts) AS admission_year,
+                QUARTER(admission_ts) AS admission_quarter,
+                DAYOFWEEK(admission_ts) AS admission_weekday,
 
-                WHEN discharge_ts IS NULL
-                THEN 1
-
-                ELSE 0
-
-            END AS missing_discharge,
-
-            DATE_TRUNC(
-                'month',
-                admission_ts
-            ) AS admission_month,
-
-            YEAR(admission_ts)
-                AS admission_year,
-
-            QUARTER(admission_ts)
-                AS admission_quarter,
-
-            DAYOFWEEK(admission_ts)
-                AS admission_weekday,
-
-            CASE
-
-                WHEN DATEDIFF(
-                    'day',
-                    admission_ts,
-                    discharge_ts
-                ) <= 1
+                CASE
+                    WHEN length_of_stay_days <= 1
                     THEN '0-1 days'
-
-                WHEN DATEDIFF(
-                    'day',
-                    admission_ts,
-                    discharge_ts
-                ) <= 3
+                    WHEN length_of_stay_days <= 3
                     THEN '2-3 days'
-
-                WHEN DATEDIFF(
-                    'day',
-                    admission_ts,
-                    discharge_ts
-                ) <= 7
+                    WHEN length_of_stay_days <= 7
                     THEN '4-7 days'
-
-                WHEN DATEDIFF(
-                    'day',
-                    admission_ts,
-                    discharge_ts
-                ) <= 14
+                    WHEN length_of_stay_days <= 14
                     THEN '8-14 days'
+                    ELSE '15+ days'
+                END AS los_bucket,
 
-                ELSE '15+ days'
+                CAST(
+                    unplanned_readmitted_30d
+                    AS INTEGER
+                ) AS unplanned_readmitted_30d
 
-            END AS los_bucket
+            FROM history
+            WHERE eligible_for_readmission_model = 1
+        """)
 
-        FROM base
+        eligible_count = conn.execute("""
+            SELECT COUNT(*)
+            FROM hospitalization_target
+            WHERE eligible_for_readmission_model = 1
+        """).fetchone()[0]
 
-    )
+        analytics_count = conn.execute("""
+            SELECT COUNT(*)
+            FROM ml_features
+        """).fetchone()[0]
 
-    SELECT
+        if eligible_count != analytics_count:
+            raise ValueError(
+                "Eligible episode count changed: "
+                f"{eligible_count:,} -> {analytics_count:,}"
+            )
 
-        *,
+        summary = conn.execute("""
+            SELECT
+                COUNT(*) AS total_records,
+                SUM(unplanned_readmitted_30d)
+                    AS unplanned_readmissions,
+                ROUND(
+                    AVG(unplanned_readmitted_30d) * 100,
+                    2
+                ) AS unplanned_readmission_rate,
+                ROUND(
+                    AVG(length_of_stay_days),
+                    2
+                ) AS avg_length_of_stay_days
+            FROM ml_features
+        """).fetchdf()
 
-        COUNT(*) OVER (
+        print("\nDataset summary:")
+        print(summary)
 
-            PARTITION BY identificador
+        print("\nFeature schema:")
+        print(
+            conn.execute(
+                "DESCRIBE ml_features"
+            ).fetchdf()
+        )
 
-            ORDER BY admission_ts
+        print("\nAnalytics dataset completed.")
 
-            RANGE BETWEEN
-                INTERVAL 365 DAY PRECEDING
-                AND CURRENT ROW
-
-        ) AS admissions_last_365d
-
-    FROM features
-    """)
-
-    print("\nDataset Summary:")
-
-    summary = conn.execute("""
-        SELECT
-
-            COUNT(*) AS total_records,
-
-            SUM(readmitted_30d_clean)
-                AS readmissions,
-
-            ROUND(
-                AVG(readmitted_30d_clean) * 100,
-                2
-            ) AS readmission_rate,
-
-            ROUND(
-                AVG(length_of_stay_days),
-                2
-            ) AS avg_los
-
-        FROM ml_features
-    """).fetchdf()
-
-    print(summary)
-
-    print("\nFeature Schema:")
-
-    schema = conn.execute("""
-        DESCRIBE ml_features
-    """).fetchdf()
-
-    print(schema)
-
-    conn.close()
-
-    print("\nAnalytics dataset completed.")
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":

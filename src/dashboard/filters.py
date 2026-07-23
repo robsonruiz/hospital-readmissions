@@ -150,8 +150,8 @@ def apply_filters(df: pd.DataFrame):
     previous_readm = st.sidebar.slider(
         "Maximum Previous Readmissions",
         0,
-        int(df["previous_readmissions"].max()),
-        int(df["previous_readmissions"].max())
+        int(df["previous_unplanned_readmissions"].max()),
+        int(df["previous_unplanned_readmissions"].max())
     )
 
     admissions_last365 = st.sidebar.slider(
@@ -215,7 +215,7 @@ def apply_filters(df: pd.DataFrame):
     ]
 
     df = df[
-        df["previous_readmissions"]
+        df["previous_unplanned_readmissions"]
         <= previous_readm
     ]
 
