@@ -47,7 +47,6 @@ from filters import apply_filters
 from loader import load_data
 from metrics import show_metrics
 
-
 st.set_page_config(
     page_title=(
         "Unplanned Hospital Readmissions Dashboard"
@@ -55,6 +54,36 @@ st.set_page_config(
     layout="wide",
 )
 
+st.markdown(
+    """
+    <style>
+    /* Título dos cards */
+    div[data-testid="stMetricLabel"] p {
+        font-size: 1.20rem !important;
+        font-weight: 700 !important;
+        line-height: 1.3 !important;
+    }
+
+    /* Valor principal dos cards */
+    div[data-testid="stMetricValue"] {
+        font-size: 2.40rem !important;
+        font-weight: 700 !important;
+        line-height: 1.2 !important;
+    }
+
+    div[data-testid="stMetricValue"] > div {
+        font-size: 2.40rem !important;
+        font-weight: 700 !important;
+    }
+
+    /* Variação ou texto secundário do card */
+    div[data-testid="stMetricDelta"] {
+        font-size: 1.05rem !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 
 def main() -> None:
     st.title(

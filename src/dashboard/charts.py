@@ -5,6 +5,41 @@ import streamlit as st
 
 TARGET_COLUMN = "unplanned_readmitted_30d"
 
+def apply_chart_font(fig) -> None:
+    fig.update_layout(
+        font=dict(size=16),
+        title=dict(font=dict(size=21)),
+        legend=dict(
+            font=dict(size=14),
+            title=dict(font=dict(size=15)),
+        ),
+        uniformtext=dict(
+            minsize=9,
+            mode="hide",
+        ),
+    )
+
+    fig.update_xaxes(
+        title_font=dict(size=16),
+        tickfont=dict(size=13),
+    )
+
+    fig.update_yaxes(
+        title_font=dict(size=16),
+        tickfont=dict(size=13),
+    )
+
+    # Somente os valores sobre as barras
+    fig.update_traces(
+        textfont_size=10,
+        selector=dict(type="bar"),
+    )
+
+    # Somente os valores dos gráficos de pizza
+    fig.update_traces(
+        textfont_size=10,
+        selector=dict(type="pie"),
+    )
 
 def _has_columns(
     df: pd.DataFrame,
@@ -119,6 +154,10 @@ def _bar_rate(
         },
         height=height,
     )
+
+    apply_chart_font(fig)
+
+    apply_chart_font(fig)
 
     st.plotly_chart(
         fig,
@@ -370,6 +409,8 @@ def plot_monthly_trend(
         height=500,
     )
 
+    apply_chart_font(fig)
+
     st.plotly_chart(
         fig,
         use_container_width=True,
@@ -416,6 +457,8 @@ def plot_quarterly_trend(
         xaxis_tickangle=-45,
         height=500,
     )
+
+    apply_chart_font(fig)
 
     st.plotly_chart(
         fig,
@@ -475,6 +518,8 @@ def plot_los_distribution(
 
     fig.update_layout(height=500)
 
+    apply_chart_font(fig)
+
     st.plotly_chart(
         fig,
         use_container_width=True,
@@ -528,6 +573,8 @@ def plot_los_vs_readmission(
     )
 
     fig.update_layout(height=500)
+
+    apply_chart_font(fig)
 
     st.plotly_chart(
         fig,
@@ -596,6 +643,8 @@ def plot_icd_codes(
         },
         height=600,
     )
+
+    apply_chart_font(fig)
 
     st.plotly_chart(
         fig,
@@ -684,6 +733,8 @@ def plot_discharge_reason_distribution(
         height=450,
         yaxis_title=None,
     )
+
+    apply_chart_font(fig)
 
     st.plotly_chart(
         fig,
@@ -775,6 +826,8 @@ def plot_heatmap(
 
     fig.update_layout(height=700)
 
+    apply_chart_font(fig)
+
     st.plotly_chart(
         fig,
         use_container_width=True,
@@ -830,6 +883,8 @@ def plot_previous_hospitalizations(
     )
 
     fig.update_layout(height=500)
+
+    apply_chart_font(fig)
 
     st.plotly_chart(
         fig,
