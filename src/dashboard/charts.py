@@ -506,14 +506,29 @@ def plot_los_distribution(
         color="status",
         nbins=50,
         barmode="overlay",
-        opacity=0.65,
+        opacity=1,
+        category_orders={
+            "status": [
+                "No unplanned readmission",
+                "Unplanned readmission",
+            ]
+        },
         title="Length of Stay Distribution",
         labels={
-            "length_of_stay_days":
-                "Length of stay (days)",
+            "length_of_stay_days": "Length of stay (days)",
             "count": "Episodes",
             "status": "Outcome",
         },
+    )
+
+    traces = {
+        trace.name: trace
+        for trace in fig.data
+    }
+
+    fig.data = (
+        traces["No unplanned readmission"],
+        traces["Unplanned readmission"],
     )
 
     fig.update_layout(height=500)
