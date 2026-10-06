@@ -1,18 +1,42 @@
 from pathlib import Path
+
 import joblib
 import numpy as np
 import pandas as pd
 import duckdb
-from sklearn.cluster import KMeans
+
+from sklearn.cluster import MiniBatchKMeans
 from sklearn.decomposition import PCA
 from sklearn.metrics import silhouette_score
 from sklearn.preprocessing import StandardScaler
 
-DATABASE_PATH = Path("data/hospital_readmissions.duckdb")
+
+DATABASE_PATH = Path(
+    "data/hospital_readmissions.duckdb"
+)
+
 OUTPUT_DIR = Path("models")
+
 RANDOM_STATE = 42
+
+# Apenas uma amostra é usada para escolher o melhor K.
+SELECTION_SAMPLE_SIZE = 20_000
+
+# Amostra usada para calcular o Silhouette Score.
+SILHOUETTE_SAMPLE_SIZE = 10_000
+
+# Tamanho dos lotes do MiniBatchKMeans.
+BATCH_SIZE = 4096
+
+# Número de clusters avaliados.
 K_RANGE = range(2, 7)
+
 TARGET = "unplanned_readmitted_30d"
+
+
+# ============================================================
+# Variáveis utilizadas na clusterização
+# ============================================================
 
 BASE_FEATURES = [
     "previous_hospitalizations",
@@ -24,107 +48,542 @@ BASE_FEATURES = [
 ]
 
 
-def load_ml_features(database_path=DATABASE_PATH):
-    con = duckdb.connect(str(database_path), read_only=True)
+# ============================================================
+# Carregamento
+# ============================================================
+
+def load_ml_features(
+    database_path=DATABASE_PATH,
+):
+
+    con = duckdb.connect(
+        str(database_path),
+        read_only=True,
+    )
+
     try:
-        return con.execute("SELECT * FROM ml_features").df()
+
+        return con.execute(
+            """
+            SELECT *
+            FROM ml_features
+            """
+        ).df()
+
     finally:
+
         con.close()
 
 
-def select_features(df):
-    features = [c for c in BASE_FEATURES if c in df.columns]
-    if not features:
-        raise ValueError("Nenhuma variável de clusterização foi encontrada em ml_features.")
+# ============================================================
+# Seleção das variáveis
+# ============================================================
 
-    X = df[features].copy()
-    for col in features:
-        X[col] = pd.to_numeric(X[col], errors="coerce")
-    X = X.replace([np.inf, -np.inf], np.nan)
-    X = X.fillna(X.median(numeric_only=True))
+def select_features(df):
+
+    features = [
+        column
+        for column in BASE_FEATURES
+        if column in df.columns
+    ]
+
+    if not features:
+
+        raise ValueError(
+            "Nenhuma das variáveis selecionadas "
+            "para clusterização foi encontrada "
+            "em ml_features."
+        )
+
+    X = df[
+        features
+    ].copy()
+
+    for column in features:
+
+        X[column] = pd.to_numeric(
+            X[column],
+            errors="coerce",
+        )
+
+    X = X.replace(
+        [np.inf, -np.inf],
+        np.nan,
+    )
+
+    X = X.fillna(
+        X.median(
+            numeric_only=True
+        )
+    )
+
     return X, features
 
 
-def fit_kmeans(X, k):
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
+# ============================================================
+# Amostragem
+# ============================================================
 
-    model = KMeans(
-        n_clusters=k,
-        random_state=RANDOM_STATE,
-        n_init=20,
+def get_sample_indices(
+    n_rows,
+    sample_size,
+):
+
+    sample_size = min(
+        sample_size,
+        n_rows,
     )
-    labels = model.fit_predict(X_scaled)
-    score = silhouette_score(X_scaled, labels)
-    return model, scaler, labels, score, X_scaled
 
+    rng = np.random.RandomState(
+        RANDOM_STATE
+    )
+
+    return rng.choice(
+        n_rows,
+        size=sample_size,
+        replace=False,
+    )
+
+
+# ============================================================
+# Escolha do número de clusters
+# ============================================================
 
 def choose_best_k(X):
+
+    print(
+        "\nPreparing sample for "
+        "cluster selection..."
+    )
+
+    selection_indices = get_sample_indices(
+        len(X),
+        SELECTION_SAMPLE_SIZE,
+    )
+
+    X_selection = X.iloc[
+        selection_indices
+    ]
+
+    scaler = StandardScaler()
+
+    X_selection_scaled = scaler.fit_transform(
+        X_selection
+    )
+
+    silhouette_indices = get_sample_indices(
+        len(X_selection_scaled),
+        SILHOUETTE_SAMPLE_SIZE,
+    )
+
+    X_silhouette = (
+        X_selection_scaled[
+            silhouette_indices
+        ]
+    )
+
     rows = []
+
+    print(
+        f"Selection sample: "
+        f"{len(X_selection):,} episodes"
+    )
+
+    print(
+        "\nEvaluating number of clusters..."
+    )
+
     for k in K_RANGE:
-        _, _, _, score, _ = fit_kmeans(X, k)
-        rows.append({"n_clusters": k, "silhouette_score": score})
 
-    metrics = pd.DataFrame(rows)
-    best_k = int(metrics.loc[metrics["silhouette_score"].idxmax(), "n_clusters"])
-    return best_k, metrics
+        print(
+            f"  K={k}"
+        )
+
+        model = MiniBatchKMeans(
+            n_clusters=k,
+            random_state=RANDOM_STATE,
+            batch_size=BATCH_SIZE,
+            n_init=3,
+            max_iter=100,
+        )
+
+        labels = model.fit_predict(
+            X_selection_scaled
+        )
+
+        silhouette_labels = labels[
+            silhouette_indices
+        ]
+
+        score = silhouette_score(
+            X_silhouette,
+            silhouette_labels,
+        )
+
+        rows.append(
+            {
+                "n_clusters": k,
+                "silhouette_score": score,
+            }
+        )
+
+        print(
+            f"    Silhouette: "
+            f"{score:.4f}"
+        )
+
+    metrics = pd.DataFrame(
+        rows
+    )
+
+    best_k = int(
+        metrics.loc[
+            metrics[
+                "silhouette_score"
+            ].idxmax(),
+            "n_clusters",
+        ]
+    )
+
+    print(
+        f"\nBest K: {best_k}"
+    )
+
+    return (
+        best_k,
+        metrics,
+    )
 
 
-def build_profile(df, labels, features):
+# ============================================================
+# Clusterização final
+# ============================================================
+
+def fit_final_clustering(
+    X,
+    n_clusters,
+):
+
+    print(
+        "\nScaling full dataset..."
+    )
+
+    scaler = StandardScaler()
+
+    X_scaled = scaler.fit_transform(
+        X
+    )
+
+    print(
+        f"Training MiniBatchKMeans "
+        f"with K={n_clusters}..."
+    )
+
+    model = MiniBatchKMeans(
+        n_clusters=n_clusters,
+        random_state=RANDOM_STATE,
+        batch_size=BATCH_SIZE,
+        n_init=3,
+        max_iter=100,
+    )
+
+    labels = model.fit_predict(
+        X_scaled
+    )
+
+    return (
+        model,
+        scaler,
+        labels,
+        X_scaled,
+    )
+
+
+# ============================================================
+# Perfil dos clusters
+# ============================================================
+
+def build_profile(
+    df,
+    labels,
+    features,
+):
+
     work = df.copy()
-    work["cluster"] = labels
 
-    aggregations = {"episodes": ("cluster", "size")}
-    aggregations.update({feature: (feature, "mean") for feature in features})
+    work["cluster"] = (
+        labels.astype(int)
+    )
 
-    profile = work.groupby("cluster", as_index=False).agg(**aggregations)
+    aggregations = {
+        "episodes": (
+            "cluster",
+            "size",
+        )
+    }
+
+    for feature in features:
+
+        aggregations[
+            feature
+        ] = (
+            feature,
+            "mean",
+        )
+
+    profile = (
+        work
+        .groupby(
+            "cluster",
+            as_index=False,
+        )
+        .agg(
+            **aggregations
+        )
+    )
+
+    # O target NÃO participa da formação
+    # dos clusters. Ele é utilizado apenas
+    # para caracterizar os grupos depois.
 
     if TARGET in work.columns:
-        work["_target"] = pd.to_numeric(work[TARGET], errors="coerce")
-        target_profile = (
-            work.groupby("cluster", as_index=False)["_target"]
-            .mean()
-            .rename(columns={"_target": "unplanned_readmission_rate"})
+
+        work["_target"] = pd.to_numeric(
+            work[TARGET],
+            errors="coerce",
         )
-        profile = profile.merge(target_profile, on="cluster", how="left")
 
-    return profile.sort_values("cluster")
+        target_profile = (
+            work
+            .groupby(
+                "cluster",
+                as_index=False,
+            )["_target"]
+            .mean()
+            .rename(
+                columns={
+                    "_target":
+                    "unplanned_readmission_rate"
+                }
+            )
+        )
+
+        profile = profile.merge(
+            target_profile,
+            on="cluster",
+            how="left",
+        )
+
+    return profile.sort_values(
+        "cluster"
+    )
 
 
-def build_pca(X_scaled, labels):
-    pca = PCA(n_components=2, random_state=RANDOM_STATE)
-    components = pca.fit_transform(X_scaled)
+# ============================================================
+# PCA
+# ============================================================
 
-    data = pd.DataFrame({
-        "pca_1": components[:, 0],
-        "pca_2": components[:, 1],
-        "cluster": labels.astype(int),
-    })
-    return data, pca.explained_variance_ratio_
+def build_pca(
+    X_scaled,
+    labels,
+):
+
+    print(
+        "\nCalculating PCA..."
+    )
+
+    # PCA é utilizado somente para
+    # visualização.
+    #
+    # Para evitar custo desnecessário,
+    # ajustamos o PCA em uma amostra.
+    pca_sample_indices = (
+        get_sample_indices(
+            len(X_scaled),
+            SELECTION_SAMPLE_SIZE,
+        )
+    )
+
+    X_pca_sample = (
+        X_scaled[
+            pca_sample_indices
+        ]
+    )
+
+    pca = PCA(
+        n_components=2,
+        random_state=RANDOM_STATE,
+    )
+
+    pca.fit(
+        X_pca_sample
+    )
+
+    # Transformamos todos os registros.
+    components = pca.transform(
+        X_scaled
+    )
+
+    result = pd.DataFrame(
+        {
+            "pca_1": components[:, 0],
+            "pca_2": components[:, 1],
+            "cluster": labels.astype(int),
+        }
+    )
+
+    explained = (
+        pca.explained_variance_ratio_
+    )
+
+    return (
+        result,
+        explained,
+    )
 
 
-def run_clustering(database_path=DATABASE_PATH, output_dir=OUTPUT_DIR):
-    output_dir.mkdir(parents=True, exist_ok=True)
+# ============================================================
+# Execução principal
+# ============================================================
 
-    df = load_ml_features(database_path)
-    X, features = select_features(df)
-    best_k, metrics = choose_best_k(X)
+def run_clustering(
+    database_path=DATABASE_PATH,
+    output_dir=OUTPUT_DIR,
+):
 
-    model, scaler, labels, best_score, X_scaled = fit_kmeans(X, best_k)
-    profile = build_profile(df, labels, features)
-    pca_data, explained = build_pca(X_scaled, labels)
+    output_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
-    results = pd.DataFrame({
-        "row_id": np.arange(len(labels)),
-        "cluster": labels.astype(int),
-    })
+    print(
+        "\nLoading ml_features..."
+    )
 
-    pca_data.insert(0, "row_id", np.arange(len(pca_data)))
+    df = load_ml_features(
+        database_path
+    )
 
-    metrics.to_csv(output_dir / "clustering_metrics.csv", index=False)
-    profile.to_csv(output_dir / "clustering_profiles.csv", index=False)
-    results.to_csv(output_dir / "clustering_results.csv", index=False)
-    pca_data.to_csv(output_dir / "clustering_pca.csv", index=False)
+    print(
+        f"Dataset: "
+        f"{len(df):,} episodes"
+    )
+
+    X, features = select_features(
+        df
+    )
+
+    print(
+        "\nVariables used:"
+    )
+
+    for feature in features:
+
+        print(
+            f"  - {feature}"
+        )
+
+    # --------------------------------------------------------
+    # Escolha de K
+    # --------------------------------------------------------
+
+    best_k, metrics = (
+        choose_best_k(X)
+    )
+
+    # --------------------------------------------------------
+    # Clusterização final
+    # --------------------------------------------------------
+
+    (
+        model,
+        scaler,
+        labels,
+        X_scaled,
+    ) = fit_final_clustering(
+        X,
+        best_k,
+    )
+
+    # --------------------------------------------------------
+    # Perfil
+    # --------------------------------------------------------
+
+    print(
+        "\nBuilding cluster profiles..."
+    )
+
+    profile = build_profile(
+        df,
+        labels,
+        features,
+    )
+
+    # --------------------------------------------------------
+    # PCA
+    # --------------------------------------------------------
+
+    pca_data, explained = (
+        build_pca(
+            X_scaled,
+            labels,
+        )
+    )
+
+    # --------------------------------------------------------
+    # Resultados dos clusters
+    # --------------------------------------------------------
+
+    results = pd.DataFrame(
+        {
+            "row_id": np.arange(
+                len(labels)
+            ),
+            "cluster": labels.astype(
+                int
+            ),
+        }
+    )
+
+    pca_data.insert(
+        0,
+        "row_id",
+        np.arange(
+            len(pca_data)
+        ),
+    )
+
+    # --------------------------------------------------------
+    # Salvamento
+    # --------------------------------------------------------
+
+    print(
+        "\nSaving results..."
+    )
+
+    metrics.to_csv(
+        output_dir
+        / "clustering_metrics.csv",
+        index=False,
+    )
+
+    profile.to_csv(
+        output_dir
+        / "clustering_profiles.csv",
+        index=False,
+    )
+
+    results.to_csv(
+        output_dir
+        / "clustering_results.csv",
+        index=False,
+    )
+
+    pca_data.to_csv(
+        output_dir
+        / "clustering_pca.csv",
+        index=False,
+    )
 
     joblib.dump(
         {
@@ -132,16 +591,106 @@ def run_clustering(database_path=DATABASE_PATH, output_dir=OUTPUT_DIR):
             "scaler": scaler,
             "features": features,
             "best_k": best_k,
-            "silhouette_score": best_score,
+            "silhouette_score": float(
+                metrics.loc[
+                    metrics[
+                        "n_clusters"
+                    ]
+                    == best_k,
+                    "silhouette_score",
+                ].iloc[0]
+            ),
         },
-        output_dir / "clustering_model.joblib",
+        output_dir
+        / "clustering_model.joblib",
     )
 
-    print("\nClusterização concluída.")
-    print(f"Variáveis: {', '.join(features)}")
-    print(f"Melhor k: {best_k}")
-    print(f"Silhouette Score: {best_score:.4f}")
-    print(f"PCA: {explained[0]:.2%} + {explained[1]:.2%}")
+    # --------------------------------------------------------
+    # Resumo
+    # --------------------------------------------------------
+
+    print(
+        "\n================================"
+    )
+
+    print(
+        "CLUSTERING COMPLETED"
+    )
+
+    print(
+        "================================"
+    )
+
+    print(
+        f"Episodes: "
+        f"{len(df):,}"
+    )
+
+    print(
+        f"Best K: "
+        f"{best_k}"
+    )
+
+    best_score = float(
+        metrics.loc[
+            metrics[
+                "n_clusters"
+            ]
+            == best_k,
+            "silhouette_score",
+        ].iloc[0]
+    )
+
+    print(
+        f"Silhouette Score: "
+        f"{best_score:.4f}"
+    )
+
+    print(
+        "PCA variance explained: "
+        f"{explained[0]:.2%} + "
+        f"{explained[1]:.2%}"
+    )
+
+    print(
+        "\nCluster sizes:"
+    )
+
+    print(
+        pd.Series(
+            labels
+        )
+        .value_counts()
+        .sort_index()
+        .rename(
+            "episodes"
+        )
+        .to_string()
+    )
+
+    print(
+        "\nFiles saved:"
+    )
+
+    print(
+        "  models/clustering_metrics.csv"
+    )
+
+    print(
+        "  models/clustering_profiles.csv"
+    )
+
+    print(
+        "  models/clustering_results.csv"
+    )
+
+    print(
+        "  models/clustering_pca.csv"
+    )
+
+    print(
+        "  models/clustering_model.joblib"
+    )
 
     return {
         "best_k": best_k,
@@ -154,4 +703,5 @@ def run_clustering(database_path=DATABASE_PATH, output_dir=OUTPUT_DIR):
 
 
 if __name__ == "__main__":
+
     run_clustering()
