@@ -9,11 +9,13 @@ DASHBOARD_DIR = Path(__file__).resolve().parent
 if str(DASHBOARD_DIR) not in sys.path:
     sys.path.insert(0, str(DASHBOARD_DIR))
 
+
 required_files = [
     "loader.py",
     "filters.py",
     "charts.py",
     "metrics.py",
+    "clustering.py",
 ]
 
 missing_files = [
@@ -43,9 +45,12 @@ from charts import (
     plot_quarterly_trend,
     plot_specialty_rate,
 )
+
+from clustering import render_clustering
 from filters import apply_filters
 from loader import load_data
 from metrics import show_metrics
+
 
 st.set_page_config(
     page_title=(
@@ -53,6 +58,7 @@ st.set_page_config(
     ),
     layout="wide",
 )
+
 
 st.markdown(
     """
@@ -82,10 +88,12 @@ st.markdown(
     }
     </style>
     """,
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
 
-def main() -> None:
+
+def render_analysis_dashboard() -> None:
+
     st.title(
         "Unplanned Hospital Readmissions Dashboard"
     )
@@ -161,6 +169,22 @@ def main() -> None:
         df,
         min_episodes=min_episodes,
     )
+
+
+def main() -> None:
+
+    analysis_tab, clustering_tab = st.tabs(
+        [
+            "Análise de dados",
+            "Clusterização",
+        ]
+    )
+
+    with analysis_tab:
+        render_analysis_dashboard()
+
+    with clustering_tab:
+        render_clustering()
 
 
 if __name__ == "__main__":
