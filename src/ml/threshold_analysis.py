@@ -1,6 +1,8 @@
 import numpy as np
 import pandas as pd
 
+from pathlib import Path
+
 from sklearn.metrics import (
     precision_score,
     recall_score,
@@ -9,6 +11,9 @@ from sklearn.metrics import (
 )
 
 from catboost import CatBoostClassifier
+
+
+MODELS_DIR = Path("models")
 
 
 def prepare_catboost_data(X, model):
@@ -52,14 +57,14 @@ def get_probabilities(
 
 def evaluate_thresholds(
     model,
-    X_test,
-    y_test,
+    X_valid,
+    y_valid,
     model_name,
 ):
 
     probabilities = get_probabilities(
         model,
-        X_test
+        X_valid
     )
 
     thresholds = np.arange(
@@ -77,7 +82,7 @@ def evaluate_thresholds(
         ).astype(int)
 
         tn, fp, fn, tp = confusion_matrix(
-            y_test,
+            y_valid,
             predictions
         ).ravel()
 
@@ -97,19 +102,19 @@ def evaluate_thresholds(
             ),
 
             "precision": precision_score(
-                y_test,
+                y_valid,
                 predictions,
                 zero_division=0
             ),
 
             "recall": recall_score(
-                y_test,
+                y_valid,
                 predictions,
                 zero_division=0
             ),
 
             "f1": f1_score(
-                y_test,
+                y_valid,
                 predictions,
                 zero_division=0
             ),
@@ -126,3 +131,90 @@ def evaluate_thresholds(
         })
 
     return pd.DataFrame(results)
+
+
+def run_threshold_analysis(
+    trained_models,
+    X_valid,
+    y_valid,
+):
+
+    all_results = []
+
+    for model_name, model in trained_models.items():
+
+        print(
+            f"\nAnalyzing thresholds: {model_name}"
+        )
+
+        results = evaluate_thresholds(
+            model,
+            X_valid,
+            y_valid,
+            model_name
+        )
+
+        all_results.append(results)
+
+    threshold_results = pd.concat(
+        all_results,
+        ignore_index=True
+    )
+
+    MODELS_DIR.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    threshold_results.to_csv(
+        MODELS_DIR
+        / "threshold_analysis_validation.csv",
+        index=False
+    )
+
+    # ----------------------------------------------------------
+    # Best threshold based on F1
+    # ----------------------------------------------------------
+
+    best_thresholds = (
+        threshold_results
+        .sort_values(
+            [
+                "model",
+                "f1",
+                "recall",
+                "precision"
+            ],
+            ascending=[
+                True,
+                False,
+                False,
+                False
+            ]
+        )
+        .groupby(
+            "model",
+            as_index=False
+        )
+        .first()
+    )
+
+    best_thresholds.to_csv(
+        MODELS_DIR
+        / "best_thresholds_validation.csv",
+        index=False
+    )
+
+    print(
+        "\nThreshold analysis saved:"
+    )
+
+    print(
+        "  models/threshold_analysis_validation.csv"
+    )
+
+    print(
+        "  models/best_thresholds_validation.csv"
+    )
+
+    return threshold_results

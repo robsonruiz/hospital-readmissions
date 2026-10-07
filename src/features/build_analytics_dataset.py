@@ -42,11 +42,6 @@ def build_analytics_dataset() -> None:
                         ORDER BY admission_ts
                     ) - 1 AS previous_hospitalizations,
 
-                    LAG(discharge_ts) OVER (
-                        PARTITION BY identificador
-                        ORDER BY admission_ts
-                    ) AS previous_discharge_ts,
-
                     COALESCE(
                         SUM(
                             COALESCE(
@@ -89,15 +84,28 @@ def build_analytics_dataset() -> None:
             SELECT
                 * EXCLUDE (
                     eligible_for_readmission_model,
-                    unplanned_readmitted_30d,
-                    previous_discharge_ts
+                    unplanned_readmitted_30d
                 ),
 
-                DATEDIFF(
-                    'day',
-                    previous_discharge_ts,
-                    admission_ts
-                ) AS days_since_previous_hospitalization,
+                CASE
+                    WHEN previous_hospitalizations = 0
+                    THEN 0
+
+                    ELSE COALESCE(
+                        DATEDIFF(
+                            'day',
+                            (
+                                SELECT MAX(h2.discharge_ts)
+                                FROM hospitalization_target h2
+                                WHERE h2.identificador = history.identificador
+                                  AND h2.discharge_ts IS NOT NULL
+                                  AND h2.discharge_ts < history.admission_ts
+                            ),
+                            admission_ts
+                        ),
+                        0
+                    )
+                END AS days_since_previous_hospitalization,
 
                 DATE_TRUNC(
                     'month',
@@ -105,18 +113,24 @@ def build_analytics_dataset() -> None:
                 ) AS admission_month,
 
                 YEAR(admission_ts) AS admission_year,
+
                 QUARTER(admission_ts) AS admission_quarter,
+
                 DAYOFWEEK(admission_ts) AS admission_weekday,
 
                 CASE
                     WHEN length_of_stay_days <= 1
                     THEN '0-1 days'
+
                     WHEN length_of_stay_days <= 3
                     THEN '2-3 days'
+
                     WHEN length_of_stay_days <= 7
                     THEN '4-7 days'
+
                     WHEN length_of_stay_days <= 14
                     THEN '8-14 days'
+
                     ELSE '15+ days'
                 END AS los_bucket,
 
@@ -126,6 +140,7 @@ def build_analytics_dataset() -> None:
                 ) AS unplanned_readmitted_30d
 
             FROM history
+
             WHERE eligible_for_readmission_model = 1
         """)
 
@@ -146,19 +161,54 @@ def build_analytics_dataset() -> None:
                 f"{eligible_count:,} -> {analytics_count:,}"
             )
 
+        validation = conn.execute("""
+            SELECT
+                MIN(days_since_previous_hospitalization)
+                    AS min_days,
+
+                MAX(days_since_previous_hospitalization)
+                    AS max_days,
+
+                SUM(
+                    CASE
+                        WHEN days_since_previous_hospitalization < 0
+                        THEN 1
+                        ELSE 0
+                    END
+                ) AS negative_days,
+
+                SUM(
+                    CASE
+                        WHEN previous_hospitalizations = 0
+                             AND days_since_previous_hospitalization <> 0
+                        THEN 1
+                        ELSE 0
+                    END
+                ) AS inconsistent_first_episodes
+
+            FROM ml_features
+        """).fetchdf()
+
+        print("\nDays-since-previous-hospitalization validation:")
+        print(validation)
+
         summary = conn.execute("""
             SELECT
                 COUNT(*) AS total_records,
+
                 SUM(unplanned_readmitted_30d)
                     AS unplanned_readmissions,
+
                 ROUND(
                     AVG(unplanned_readmitted_30d) * 100,
                     2
                 ) AS unplanned_readmission_rate,
+
                 ROUND(
                     AVG(length_of_stay_days),
                     2
                 ) AS avg_length_of_stay_days
+
             FROM ml_features
         """).fetchdf()
 

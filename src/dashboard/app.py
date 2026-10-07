@@ -9,6 +9,7 @@ DASHBOARD_DIR = Path(__file__).resolve().parent
 if str(DASHBOARD_DIR) not in sys.path:
     sys.path.insert(0, str(DASHBOARD_DIR))
 
+
 required_files = [
     "loader.py",
     "filters.py",
@@ -44,10 +45,13 @@ from charts import (
     plot_quarterly_trend,
     plot_specialty_rate,
 )
+
+from clustering import render_clustering
 from filters import apply_filters
 from loader import load_data
 from metrics import show_metrics
 from interpretability import show_interpretability
+
 
 
 st.set_page_config(
@@ -56,6 +60,7 @@ st.set_page_config(
     ),
     layout="wide",
 )
+
 
 st.markdown(
     """
@@ -85,7 +90,7 @@ st.markdown(
     }
     </style>
     """,
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
 
 
