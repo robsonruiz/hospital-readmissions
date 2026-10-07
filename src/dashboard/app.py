@@ -14,6 +14,7 @@ required_files = [
     "filters.py",
     "charts.py",
     "metrics.py",
+    "interpretability.py",
 ]
 
 missing_files = [
@@ -46,6 +47,8 @@ from charts import (
 from filters import apply_filters
 from loader import load_data
 from metrics import show_metrics
+from interpretability import show_interpretability
+
 
 st.set_page_config(
     page_title=(
@@ -85,7 +88,8 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-def main() -> None:
+
+def show_dashboard() -> None:
     st.title(
         "Unplanned Hospital Readmissions Dashboard"
     )
@@ -161,6 +165,21 @@ def main() -> None:
         df,
         min_episodes=min_episodes,
     )
+
+
+def main() -> None:
+    tab_dashboard, tab_interpretability = st.tabs(
+        [
+            "Dashboard",
+            "Interpretabilidade",
+        ]
+    )
+
+    with tab_dashboard:
+        show_dashboard()
+
+    with tab_interpretability:
+        show_interpretability()
 
 
 if __name__ == "__main__":
