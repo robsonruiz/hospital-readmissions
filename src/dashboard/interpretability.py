@@ -24,18 +24,27 @@ MODEL_FILES = {
 SHAP_SAMPLE_SIZE = 2000
 RANDOM_STATE = 42
 
+OUTPUT_DIR = MODELS_DIR / "interpretability"
+
 
 @st.cache_data
 def load_validation_data():
-    """Load the exact temporal validation set used by the ML pipeline."""
+    """Load the same temporal validation set used by the ML pipeline."""
     df = load_ml_data()
 
-    prepared = prepare_data(df)
-
-    # prepare_data() returns 11 values.
-    # X_valid is item 2 (index 1) and y_valid is item 5 (index 4).
-    X_valid = prepared[1]
-    y_valid = prepared[4]
+    (
+        _X_train,
+        X_valid,
+        _X_test,
+        _y_train,
+        y_valid,
+        _y_test,
+        _train_df,
+        _validation_df,
+        _test_df,
+        _train_cutoff,
+        _validation_cutoff,
+    ) = prepare_data(df)
 
     return X_valid, y_valid
 
@@ -303,6 +312,55 @@ def plot_local_explanation(
     return fig, local
 
 
+def save_interpretability_outputs(
+    model_name,
+    shap_values,
+    X_display,
+    importance,
+):
+    """Save global importance and observation-level SHAP values."""
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    model_key = (
+        model_name.lower()
+        .replace(" ", "_")
+        .replace("-", "_")
+    )
+
+    importance_to_save = importance.copy()
+    importance_to_save["model"] = model_name
+
+    importance_to_save.to_csv(
+        OUTPUT_DIR / f"global_importance_{model_key}.csv",
+        index=False,
+    )
+
+    shap_rows = []
+
+    for feature_index, feature in enumerate(X_display.columns):
+        shap_rows.append(
+            pd.DataFrame(
+                {
+                    "observation": np.arange(len(X_display)),
+                    "feature": feature,
+                    "feature_value": X_display.iloc[:, feature_index].values,
+                    "shap_value": shap_values[:, feature_index],
+                }
+            )
+        )
+
+    shap_long = pd.concat(
+        shap_rows,
+        ignore_index=True,
+    )
+
+    shap_long.to_csv(
+        OUTPUT_DIR / f"shap_values_{model_key}.csv",
+        index=False,
+    )
+
+
+
 def show_interpretability():
     st.header("Interpretabilidade")
 
@@ -357,6 +415,17 @@ def show_interpretability():
     importance = global_importance(
         shap_values,
         X_display,
+    )
+
+    save_interpretability_outputs(
+        model_name,
+        shap_values,
+        X_display,
+        importance,
+    )
+
+    st.success(
+        f"Resultados salvos em: {OUTPUT_DIR}"
     )
 
     st.subheader("Importância global")

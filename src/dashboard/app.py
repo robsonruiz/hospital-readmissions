@@ -46,7 +46,6 @@ from charts import (
     plot_specialty_rate,
 )
 
-from clustering import render_clustering
 from filters import apply_filters
 from loader import load_data
 from metrics import show_metrics
@@ -92,7 +91,6 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
-
 
 def show_dashboard() -> None:
     st.title(
