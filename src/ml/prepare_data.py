@@ -20,6 +20,7 @@ DROP_COLUMNS = [
     "discharge_ts",
     "previous_discharge_ts",
     "admission_month",
+    "identificador",
 ]
 
 

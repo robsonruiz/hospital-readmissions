@@ -4,15 +4,23 @@ import joblib
 import numpy as np
 import pandas as pd
 import plotly.express as px
-import shap
 import streamlit as st
-
 from sklearn.pipeline import Pipeline
 
 from src.ml.prepare_data import load_ml_data, prepare_data
 
 
-MODELS_DIR = Path("models")
+# =============================================================================
+# Configuração
+# =============================================================================
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+MODELS_DIR = PROJECT_ROOT / "models"
+OUTPUT_DIR = MODELS_DIR / "interpretability"
+
+SHAP_SAMPLE_SIZE = 300
+SHAP_BATCH_SIZE = 50
+RANDOM_STATE = 42
 
 MODEL_FILES = {
     "Random Forest": MODELS_DIR / "random_forest.joblib",
@@ -21,32 +29,16 @@ MODEL_FILES = {
     "CatBoost": MODELS_DIR / "catboost.joblib",
 }
 
-SHAP_SAMPLE_SIZE = 2000
-RANDOM_STATE = 42
 
-OUTPUT_DIR = MODELS_DIR / "interpretability"
-
+# =============================================================================
+# Dados e modelos
+# =============================================================================
 
 @st.cache_data
 def load_validation_data():
-    """Load the same temporal validation set used by the ML pipeline."""
     df = load_ml_data()
-
-    (
-        _X_train,
-        X_valid,
-        _X_test,
-        _y_train,
-        y_valid,
-        _y_test,
-        _train_df,
-        _validation_df,
-        _test_df,
-        _train_cutoff,
-        _validation_cutoff,
-    ) = prepare_data(df)
-
-    return X_valid, y_valid
+    prepared = prepare_data(df)
+    return prepared[1], prepared[4]
 
 
 @st.cache_resource
@@ -64,11 +56,7 @@ def sample_validation_data(X_valid, y_valid):
         SHAP_SAMPLE_SIZE,
         replace=False,
     )
-
-    return (
-        X_valid.iloc[indices].copy(),
-        y_valid.iloc[indices].copy(),
-    )
+    return X_valid.iloc[indices].copy(), y_valid.iloc[indices].copy()
 
 
 def prepare_catboost_data(X, model):
@@ -81,42 +69,103 @@ def prepare_catboost_data(X, model):
     return X
 
 
-def normalize_shap_values(shap_values):
-    """
-    Normalize SHAP output for binary classification.
+# =============================================================================
+# SHAP
+# =============================================================================
 
-    Depending on the SHAP version/model, binary outputs may be returned
-    as a list or as a 3-dimensional ndarray.
-    """
-    if isinstance(shap_values, list):
-        if len(shap_values) > 1:
-            return np.asarray(shap_values[1])
-        return np.asarray(shap_values[0])
+def normalize_shap_values(values):
+    if isinstance(values, list):
+        return np.asarray(
+            values[1] if len(values) > 1 else values[0]
+        )
 
-    shap_values = np.asarray(shap_values)
+    values = np.asarray(values)
 
-    if shap_values.ndim == 3:
-        if shap_values.shape[-1] == 2:
-            return shap_values[:, :, 1]
+    if values.ndim == 3:
+        if values.shape[-1] == 2:
+            return values[:, :, 1]
 
-        if shap_values.shape[1] == 2:
-            return shap_values[:, 1, :]
+        if values.shape[1] == 2:
+            return values[:, 1, :]
 
-    return shap_values
+    return values
+
+
+def get_original_feature_names(preprocessor):
+    feature_names = preprocessor.get_feature_names_out()
+    original_columns = []
+
+    for name in feature_names:
+        clean_name = name.split("__", 1)[-1]
+
+        matches = [
+            column
+            for column in preprocessor.feature_names_in_
+            if clean_name == column
+            or clean_name.startswith(f"{column}_")
+        ]
+
+        if matches:
+            original_columns.append(
+                max(matches, key=len)
+            )
+        else:
+            original_columns.append(clean_name)
+
+    return feature_names, original_columns
+
+
+def aggregate_shap_values(
+    shap_values,
+    transformed_feature_names,
+    original_feature_names,
+    X_original,
+):
+    grouped = pd.DataFrame(
+        shap_values,
+        columns=transformed_feature_names,
+        index=X_original.index,
+    )
+
+    aggregated = pd.DataFrame(index=X_original.index)
+
+    for original_feature in dict.fromkeys(original_feature_names):
+        columns = [
+            transformed_feature_names[i]
+            for i, name in enumerate(original_feature_names)
+            if name == original_feature
+        ]
+
+        aggregated[original_feature] = grouped[columns].sum(axis=1)
+
+    return aggregated
 
 
 def calculate_shap(model_name, model, X):
+    import shap
+
     if model_name == "CatBoost":
         X_model = prepare_catboost_data(X, model)
-
         explainer = shap.TreeExplainer(model)
-        shap_values = explainer.shap_values(X_model)
+        shap_parts = []
 
-        return (
-            normalize_shap_values(shap_values),
-            X_model,
-            explainer,
-        )
+        for start in range(0, len(X_model), SHAP_BATCH_SIZE):
+            batch = X_model.iloc[
+                start:start + SHAP_BATCH_SIZE
+            ]
+
+            values = normalize_shap_values(
+                explainer.shap_values(batch)
+            )
+
+            shap_parts.append(
+                np.asarray(values, dtype=np.float32)
+            )
+
+        shap_values = np.vstack(shap_parts)
+        feature_names = list(X_model.columns)
+
+        return shap_values, X_model[feature_names].copy()
 
     if not isinstance(model, Pipeline):
         raise TypeError(
@@ -126,47 +175,152 @@ def calculate_shap(model_name, model, X):
     preprocessor = model.named_steps["preprocessor"]
     estimator = model.steps[-1][1]
 
-    X_transformed = preprocessor.transform(X)
-
-    if hasattr(X_transformed, "toarray"):
-        X_transformed = X_transformed.toarray()
-
-    feature_names = preprocessor.get_feature_names_out()
-
-    X_display = pd.DataFrame(
-        X_transformed,
-        columns=feature_names,
-        index=X.index,
+    transformed_names, original_names = (
+        get_original_feature_names(preprocessor)
     )
 
     explainer = shap.TreeExplainer(estimator)
-    shap_values = explainer.shap_values(X_transformed)
+    shap_parts = []
 
-    return (
-        normalize_shap_values(shap_values),
-        X_display,
-        explainer,
+    for start in range(0, len(X), SHAP_BATCH_SIZE):
+        batch = X.iloc[start:start + SHAP_BATCH_SIZE]
+
+        transformed = preprocessor.transform(batch)
+
+        if hasattr(transformed, "toarray"):
+            transformed = transformed.toarray()
+
+        transformed = np.asarray(
+            transformed,
+            dtype=np.float32,
+        )
+
+        values = normalize_shap_values(
+            explainer.shap_values(transformed)
+        )
+
+        shap_parts.append(
+            np.asarray(values, dtype=np.float32)
+        )
+
+        del transformed
+
+    shap_values_encoded = np.vstack(shap_parts)
+
+    shap_values = aggregate_shap_values(
+        shap_values_encoded,
+        transformed_names,
+        original_names,
+        X,
     )
+
+    return shap_values.to_numpy(dtype=np.float32), X.copy()
 
 
 def global_importance(shap_values, X_display):
-    importance = pd.DataFrame(
-        {
-            "feature": X_display.columns,
-            "mean_abs_shap": np.abs(shap_values).mean(axis=0),
-        }
+    return (
+        pd.DataFrame(
+            {
+                "feature": X_display.columns,
+                "mean_abs_shap": np.abs(shap_values).mean(axis=0),
+            }
+        )
+        .sort_values(
+            "mean_abs_shap",
+            ascending=False,
+        )
+        .reset_index(drop=True)
     )
 
-    return importance.sort_values(
-        "mean_abs_shap",
-        ascending=False,
-    ).reset_index(drop=True)
+
+# =============================================================================
+# Exportação
+# =============================================================================
+
+def save_model_results(
+    model_name,
+    shap_values,
+    X_display,
+    importance,
+):
+    OUTPUT_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    key = (
+        model_name.lower()
+        .replace(" ", "_")
+        .replace("-", "_")
+    )
+
+    global_file = (
+        OUTPUT_DIR / f"global_importance_{key}.csv"
+    )
+    shap_file = (
+        OUTPUT_DIR / f"shap_values_{key}.csv"
+    )
+
+    result = importance.copy()
+    result["model"] = model_name
+    result.to_csv(
+        global_file,
+        index=False,
+    )
+
+    rows = []
+
+    for observation in range(len(X_display)):
+        for feature_index, feature in enumerate(
+            X_display.columns
+        ):
+            rows.append(
+                {
+                    "observation": observation,
+                    "feature": feature,
+                    "feature_value": X_display.iloc[
+                        observation,
+                        feature_index,
+                    ],
+                    "shap_value": shap_values[
+                        observation,
+                        feature_index,
+                    ],
+                }
+            )
+
+    pd.DataFrame(rows).to_csv(
+        shap_file,
+        index=False,
+    )
+
+    return global_file, shap_file
 
 
-def plot_global_importance(importance, top_n=15):
-    data = importance.head(top_n).sort_values(
-        "mean_abs_shap",
-        ascending=True,
+def save_comparison(results):
+    comparison_file = (
+        OUTPUT_DIR / "global_importance_comparison.csv"
+    )
+
+    pd.concat(
+        results,
+        ignore_index=True,
+    ).to_csv(
+        comparison_file,
+        index=False,
+    )
+
+    return comparison_file
+
+
+# =============================================================================
+# Visualizações
+# =============================================================================
+
+def plot_global_importance(importance, top_n):
+    data = (
+        importance.head(top_n)
+        .sort_values("mean_abs_shap")
     )
 
     fig = px.bar(
@@ -176,46 +330,56 @@ def plot_global_importance(importance, top_n=15):
         orientation="h",
         labels={
             "mean_abs_shap": "Mean |SHAP value|",
-            "feature": "Feature",
+            "feature": "Variável",
         },
-        title=f"Top {top_n} features por importância SHAP",
+        title=(
+            f"Top {top_n} variáveis por importância SHAP"
+        ),
     )
 
     fig.update_layout(
         height=max(500, top_n * 32),
-        margin=dict(l=10, r=20, t=60, b=20),
+        margin=dict(
+            l=10,
+            r=20,
+            t=60,
+            b=20,
+        ),
     )
 
     return fig
 
 
-def plot_shap_beeswarm(shap_values, X_display, top_features):
+def plot_shap_beeswarm(
+    shap_values,
+    X_display,
+    top_features,
+):
     selected = top_features["feature"].tolist()
 
-    positions = [
-        X_display.columns.get_loc(feature)
-        for feature in selected
-    ]
+    rows = []
 
-    shap_selected = shap_values[:, positions]
-    X_selected = X_display[selected].copy()
+    for feature in selected:
+        feature_index = X_display.columns.get_loc(
+            feature
+        )
 
-    long_rows = []
-
-    for column_index, feature in enumerate(selected):
-        values = X_selected.iloc[:, column_index]
-        shap_column = shap_selected[:, column_index]
-
-        for value, shap_value in zip(values, shap_column):
-            long_rows.append(
+        for observation in range(len(X_display)):
+            rows.append(
                 {
                     "feature": feature,
-                    "value": value,
-                    "shap_value": shap_value,
+                    "shap_value": shap_values[
+                        observation,
+                        feature_index,
+                    ],
+                    "feature_value": X_display.iloc[
+                        observation,
+                        feature_index,
+                    ],
                 }
             )
 
-    data = pd.DataFrame(long_rows)
+    data = pd.DataFrame(rows)
 
     order = (
         top_features.sort_values(
@@ -225,152 +389,191 @@ def plot_shap_beeswarm(shap_values, X_display, top_features):
         .tolist()
     )
 
-    fig = px.scatter(
+    fig = px.strip(
         data,
         x="shap_value",
         y="feature",
-        color="value",
-        category_orders={"feature": order},
+        orientation="h",
+        category_orders={
+            "feature": order,
+        },
+        hover_data={
+            "feature_value": True,
+            "shap_value": ":.4f",
+        },
         labels={
             "shap_value": "SHAP value",
-            "feature": "Feature",
-            "value": "Feature value",
+            "feature": "Variável",
+            "feature_value": "Valor da variável",
         },
         title="Impacto das variáveis na predição",
-        hover_data=["value", "shap_value"],
     )
 
-    fig.add_vline(x=0, line_width=1)
+    fig.add_vline(
+        x=0,
+        line_width=1,
+    )
 
-    fig.update_traces(marker=dict(size=5))
+    fig.update_traces(
+        marker=dict(size=6),
+    )
 
     fig.update_layout(
         height=max(500, len(selected) * 35),
-        margin=dict(l=10, r=20, t=60, b=20),
+        margin=dict(
+            l=10,
+            r=20,
+            t=60,
+            b=20,
+        ),
     )
 
     return fig
 
 
-def plot_local_explanation(
-    shap_values,
-    X_display,
-    row_position,
-    top_n=15,
-):
-    row_shap = shap_values[row_position]
+# =============================================================================
+# Execução dos modelos
+# =============================================================================
 
-    local = pd.DataFrame(
-        {
-            "feature": X_display.columns,
-            "shap_value": row_shap,
-            "feature_value": X_display.iloc[row_position].values,
-        }
+def run_all_models(X_sample):
+    OUTPUT_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
     )
 
-    local["abs_shap"] = local["shap_value"].abs()
+    results = []
+    statuses = []
 
-    local = local.sort_values(
-        "abs_shap",
-        ascending=False,
-    ).head(top_n)
-
-    local = local.sort_values(
-        "shap_value",
-        ascending=True,
-    )
-
-    local["direction"] = np.where(
-        local["shap_value"] >= 0,
-        "Aumenta a predição",
-        "Reduz a predição",
-    )
-
-    fig = px.bar(
-        local,
-        x="shap_value",
-        y="feature",
-        color="direction",
-        orientation="h",
-        hover_data=["feature_value", "shap_value"],
-        labels={
-            "shap_value": "SHAP value",
-            "feature": "Feature",
-            "feature_value": "Valor da feature",
-            "direction": "Efeito",
-        },
-        title=f"Explicação da observação {row_position}",
-    )
-
-    fig.add_vline(x=0, line_width=1)
-
-    fig.update_layout(
-        height=max(500, top_n * 32),
-        margin=dict(l=10, r=20, t=60, b=20),
-    )
-
-    return fig, local
-
-
-def save_interpretability_outputs(
-    model_name,
-    shap_values,
-    X_display,
-    importance,
-):
-    """Save global importance and observation-level SHAP values."""
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-    model_key = (
-        model_name.lower()
-        .replace(" ", "_")
-        .replace("-", "_")
-    )
-
-    importance_to_save = importance.copy()
-    importance_to_save["model"] = model_name
-
-    importance_to_save.to_csv(
-        OUTPUT_DIR / f"global_importance_{model_key}.csv",
-        index=False,
-    )
-
-    shap_rows = []
-
-    for feature_index, feature in enumerate(X_display.columns):
-        shap_rows.append(
-            pd.DataFrame(
+    for model_name, model_path in MODEL_FILES.items():
+        if not model_path.exists():
+            statuses.append(
                 {
-                    "observation": np.arange(len(X_display)),
-                    "feature": feature,
-                    "feature_value": X_display.iloc[:, feature_index].values,
-                    "shap_value": shap_values[:, feature_index],
+                    "model": model_name,
+                    "status": "Modelo não encontrado",
                 }
             )
-        )
+            continue
 
-    shap_long = pd.concat(
-        shap_rows,
-        ignore_index=True,
+        try:
+            model = load_model(model_name)
+
+            shap_values, X_display = calculate_shap(
+                model_name,
+                model,
+                X_sample,
+            )
+
+            importance = global_importance(
+                shap_values,
+                X_display,
+            )
+
+            global_file, shap_file = (
+                save_model_results(
+                    model_name,
+                    shap_values,
+                    X_display,
+                    importance,
+                )
+            )
+
+            result = importance.copy()
+            result["model"] = model_name
+            results.append(result)
+
+            statuses.append(
+                {
+                    "model": model_name,
+                    "status": "Concluído",
+                    "global_file": str(
+                        global_file
+                    ),
+                    "shap_file": str(
+                        shap_file
+                    ),
+                }
+            )
+
+        except Exception as exc:
+            statuses.append(
+                {
+                    "model": model_name,
+                    "status": f"Erro: {exc}",
+                }
+            )
+
+    comparison_file = (
+        save_comparison(results)
+        if results
+        else None
     )
 
-    shap_long.to_csv(
-        OUTPUT_DIR / f"shap_values_{model_key}.csv",
-        index=False,
+    return (
+        results,
+        statuses,
+        comparison_file,
     )
 
 
+# =============================================================================
+# Interface
+# =============================================================================
 
 def show_interpretability():
     st.header("Interpretabilidade")
 
     st.markdown(
-        """
-        A análise utiliza SHAP para explicar as predições dos modelos
-        de classificação. Os resultados são calculados sobre uma amostra
-        da base de validação temporal.
-        """
+        "Análise SHAP dos modelos utilizando a "
+        "base de validação temporal."
     )
+
+    X_valid, y_valid = load_validation_data()
+    X_sample, y_sample = sample_validation_data(
+        X_valid,
+        y_valid,
+    )
+
+    st.info(
+        f"Amostra utilizada: "
+        f"{len(X_sample):,} observações da validação."
+    )
+
+    st.write(
+        f"Resultados salvos em: `{OUTPUT_DIR}`"
+    )
+
+    if st.button(
+        "Gerar resultados dos 4 modelos",
+        type="primary",
+    ):
+        with st.spinner(
+            "Calculando SHAP em lotes para os quatro modelos..."
+        ):
+            results, statuses, comparison_file = (
+                run_all_models(X_sample)
+            )
+
+        st.subheader("Status")
+
+        st.dataframe(
+            pd.DataFrame(statuses),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        if results:
+            st.success(
+                "Resultados dos modelos foram "
+                "gerados e salvos."
+            )
+
+            st.write(
+                f"Comparação: `{comparison_file}`"
+            )
+        else:
+            st.error(
+                "Nenhum modelo pôde ser processado."
+            )
 
     available_models = [
         name
@@ -380,71 +583,92 @@ def show_interpretability():
 
     if not available_models:
         st.error(
-            "Nenhum modelo treinado foi encontrado em models/."
+            "Nenhum modelo treinado foi encontrado "
+            "em models/."
         )
         return
 
+    st.divider()
+
     model_name = st.selectbox(
-        "Modelo",
+        "Modelo para visualização",
         available_models,
     )
 
     top_n = st.slider(
         "Número de variáveis exibidas",
-        min_value=5,
-        max_value=20,
-        value=15,
+        5,
+        20,
+        15,
     )
 
-    with st.spinner("Calculando valores SHAP..."):
-        X_valid, y_valid = load_validation_data()
+    key = (
+        model_name.lower()
+        .replace(" ", "_")
+        .replace("-", "_")
+    )
 
-        X_sample, y_sample = sample_validation_data(
-            X_valid,
-            y_valid,
+    global_file = (
+        OUTPUT_DIR / f"global_importance_{key}.csv"
+    )
+    shap_file = (
+        OUTPUT_DIR / f"shap_values_{key}.csv"
+    )
+
+    if not global_file.exists() or not shap_file.exists():
+        st.info(
+            "Gere os resultados SHAP acima para "
+            "visualizar este modelo."
         )
+        return
 
-        model = load_model(model_name)
+    importance = pd.read_csv(global_file)
+    shap_data = pd.read_csv(shap_file)
 
-        shap_values, X_display, _ = calculate_shap(
-            model_name,
-            model,
-            X_sample,
+    shap_pivot = (
+        shap_data.pivot(
+            index="observation",
+            columns="feature",
+            values="shap_value",
         )
-
-    importance = global_importance(
-        shap_values,
-        X_display,
+        .sort_index()
     )
 
-    save_interpretability_outputs(
-        model_name,
-        shap_values,
-        X_display,
-        importance,
+    value_pivot = (
+        shap_data.pivot(
+            index="observation",
+            columns="feature",
+            values="feature_value",
+        )
+        .sort_index()
     )
 
-    st.success(
-        f"Resultados salvos em: {OUTPUT_DIR}"
-    )
+    shap_values = shap_pivot[
+        importance["feature"].tolist()
+    ].to_numpy()
+
+    X_display = value_pivot[
+        importance["feature"].tolist()
+    ]
 
     st.subheader("Importância global")
 
-    col1, col2 = st.columns(2)
+    c1, c2 = st.columns(2)
 
-    with col1:
+    with c1:
         st.plotly_chart(
             plot_global_importance(
                 importance,
-                top_n=top_n,
+                top_n,
             ),
             use_container_width=True,
         )
 
-    with col2:
+    with c2:
         st.dataframe(
             importance.head(top_n).assign(
-                mean_abs_shap=lambda x: x["mean_abs_shap"].round(5)
+                mean_abs_shap=lambda x:
+                x["mean_abs_shap"].round(5)
             ),
             use_container_width=True,
             hide_index=True,
@@ -452,61 +676,23 @@ def show_interpretability():
 
     st.subheader("Impacto das variáveis")
 
-    top_features = importance.head(top_n)
-
     st.plotly_chart(
         plot_shap_beeswarm(
             shap_values,
             X_display,
-            top_features,
+            importance.head(top_n),
         ),
         use_container_width=True,
     )
 
-    st.markdown(
-        """
-        Valores SHAP positivos indicam contribuição para aumentar a
-        predição da classe positiva, enquanto valores negativos indicam
-        contribuição para reduzi-la.
-        """
-    )
-
-    st.subheader("Explicação individual")
-
-    row_position = st.number_input(
-        "Observação da validação",
-        min_value=0,
-        max_value=len(X_sample) - 1,
-        value=0,
-        step=1,
-    )
-
-    local_fig, local_table = plot_local_explanation(
-        shap_values,
-        X_display,
-        int(row_position),
-        top_n=top_n,
-    )
-
-    st.plotly_chart(
-        local_fig,
-        use_container_width=True,
-    )
-
-    st.dataframe(
-        local_table[
-            [
-                "feature",
-                "feature_value",
-                "shap_value",
-                "direction",
-            ]
-        ].round(5),
-        use_container_width=True,
-        hide_index=True,
-    )
-
     st.caption(
-        f"A análise utiliza {len(X_sample):,} observações "
-        "da base de validação."
+        "Cada ponto representa uma observação da "
+        "amostra SHAP. O eixo horizontal indica a "
+        "contribuição da variável para a predição. "
+        "O valor original da variável pode ser "
+        "consultado ao passar o cursor sobre o ponto."
     )
+
+
+if __name__ == "__main__":
+    show_interpretability()

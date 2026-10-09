@@ -5,41 +5,32 @@ from src.ml.prepare_data import (
     prepare_data,
     print_split_summary,
 )
-
 from src.ml.train_models import (
     train_models,
     train_catboost,
 )
-
 from src.ml.evaluate_models import evaluate_models
-
 from src.ml.threshold_analysis import run_threshold_analysis
 
 
-MODELS_DIR = Path("models")
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+MODELS_DIR = PROJECT_ROOT / "models"
 
 
 def run_ml():
-
-    print("=" * 70)
+    print("\n" + "=" * 70)
     print("MACHINE LEARNING PIPELINE")
     print("=" * 70)
 
-    # ==============================================================
-    # 1. LOAD DATA
-    # ==============================================================
-
-    print("\n1 - Loading ml_features...")
+    # 1. Load data
+    print("\n=== STEP 1 - Loading ML data ===")
 
     df = load_ml_data()
 
     print(f"Loaded: {len(df):,} records")
 
-    # ==============================================================
-    # 2. TEMPORAL SPLIT
-    # ==============================================================
-
-    print("\n2 - Creating temporal train/validation/test split...")
+    # 2. Temporal split
+    print("\n=== STEP 2 - Creating temporal split ===")
 
     (
         X_train,
@@ -68,43 +59,33 @@ def run_ml():
     print(f"  X_valid: {X_valid.shape}")
     print(f"  X_test:  {X_test.shape}")
 
-    # ==============================================================
-    # 3. TRAIN MODELS
-    # ==============================================================
+    # 3. Train models
+    print("\n=== STEP 3 - Training models ===")
 
-    print(
-        "\n3 - Training Random Forest, XGBoost and LightGBM..."
-    )
+    print("\nTraining Random Forest, XGBoost and LightGBM...")
 
     trained_models = train_models(
         X_train,
         y_train,
     )
 
-    print("\n4 - Training CatBoost...")
+    print("\nTraining CatBoost...")
 
     trained_models["catboost"] = train_catboost(
         X_train,
         y_train,
     )
 
-    # ==============================================================
-    # 4. VALIDATION
-    # ==============================================================
+    print("\nAll models trained successfully.")
 
-    print(
-        "\n5 - Evaluating models on VALIDATION set..."
-    )
+    # 4. Validation
+    print("\n=== STEP 4 - Evaluating models on validation set ===")
 
     validation_results = evaluate_models(
         trained_models,
         X_valid,
         y_valid,
     )
-
-    # ==============================================================
-    # 5. SAVE VALIDATION RESULTS
-    # ==============================================================
 
     MODELS_DIR.mkdir(
         parents=True,
@@ -125,13 +106,7 @@ def run_ml():
         f"\n  {validation_results_path}"
     )
 
-    # ==============================================================
-    # 6. DISPLAY VALIDATION RESULTS
-    # ==============================================================
-
-    print("\n" + "=" * 70)
-    print("VALIDATION RESULTS")
-    print("=" * 70)
+    print("\nValidation results:")
 
     print(
         validation_results
@@ -142,17 +117,12 @@ def run_ml():
         .to_string(index=False)
     )
 
-    # ==============================================================
-    # 7. THRESHOLD ANALYSIS
-    # ==============================================================
-
-    print("\n" + "=" * 70)
-    print("THRESHOLD ANALYSIS")
-    print("=" * 70)
+    # 5. Threshold analysis
+    print("\n=== STEP 5 - Threshold analysis ===")
 
     print(
         "\nRunning threshold analysis using "
-        "the VALIDATION set only..."
+        "the validation set only..."
     )
 
     threshold_results = run_threshold_analysis(
@@ -161,62 +131,34 @@ def run_ml():
         y_valid,
     )
 
+    print("\nThreshold analysis completed.")
+
+    print("\nGenerated threshold files:")
     print(
-        "\nThreshold analysis completed."
+        "  models/threshold_analysis_validation.csv"
+    )
+    print(
+        "  models/best_thresholds_validation.csv"
     )
 
-    # ==============================================================
-    # 8. TEST SET REMAINS UNTOUCHED
-    # ==============================================================
-
-    print("\n" + "=" * 70)
-    print("TEST SET")
-    print("=" * 70)
+    # 6. Test set
+    print("\n=== STEP 6 - Test set ===")
 
     print(
         "The test set was NOT used for model selection, "
         "threshold selection or hyperparameter decisions."
     )
 
-    print(
-        f"Test records: {len(X_test):,}"
-    )
+    print(f"Test records: {len(X_test):,}")
 
     print(
         f"Test positive rate: "
         f"{y_test.mean() * 100:.2f}%"
     )
 
-    # ==============================================================
-    # 9. FINISHED
-    # ==============================================================
-
     print("\n" + "=" * 70)
     print("MACHINE LEARNING PIPELINE COMPLETED")
     print("=" * 70)
-
-    print("\nGenerated files:")
-
-    print(
-        "  models/validation_results.csv"
-    )
-
-    print(
-        "  models/threshold_analysis_validation.csv"
-    )
-
-    print(
-        "  models/best_thresholds_validation.csv"
-    )
-
-    print(
-        "\nThe test set remains untouched "
-        "for the final evaluation."
-    )
-
-    # ==============================================================
-    # RETURN RESULTS
-    # ==============================================================
 
     return {
         "trained_models": trained_models,
@@ -236,11 +178,5 @@ def run_ml():
     }
 
 
-def main():
-
-    run_ml()
-
-
 if __name__ == "__main__":
-
-    main()
+    run_ml()

@@ -11,6 +11,9 @@ from src.features.build_analytics_dataset import (
     build_analytics_dataset,
 )
 
+from src.ml.run_ml import run_ml
+
+
 def main() -> None:
     print("\n=== STEP 1 - Loading CSV files ===")
     load_raw_data()
@@ -26,6 +29,9 @@ def main() -> None:
 
     print("\n=== STEP 5 - Building Analytics Dataset ===")
     build_analytics_dataset()
+
+    print("\n=== STEP 6 - Running Machine Learning Pipeline ===")
+    run_ml()
 
     print("\n=== PIPELINE COMPLETED SUCCESSFULLY ===")
 
