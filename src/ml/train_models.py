@@ -7,6 +7,8 @@ from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder
+from sklearn.linear_model import LogisticRegression
+from sklearn.tree import DecisionTreeClassifier
 from sklearn.ensemble import RandomForestClassifier
 
 from xgboost import XGBClassifier
@@ -19,7 +21,6 @@ MODEL_DIR.mkdir(exist_ok=True)
 
 
 def get_columns(X):
-
     categorical = X.select_dtypes(
         include=["object", "category"]
     ).columns.tolist()
@@ -32,7 +33,6 @@ def get_columns(X):
 
 
 def build_preprocessor(X):
-
     numerical, categorical = get_columns(X)
 
     numerical_pipeline = Pipeline([
@@ -72,7 +72,6 @@ def build_preprocessor(X):
 
 
 def train_models(X_train, y_train):
-
     print("\nPreparing preprocessing...")
 
     preprocessor = build_preprocessor(X_train)
@@ -88,6 +87,18 @@ def train_models(X_train, y_train):
     )
 
     models = {
+        "logistic_regression": LogisticRegression(
+            max_iter=1000,
+            class_weight="balanced",
+            random_state=42
+        ),
+
+        "decision_tree": DecisionTreeClassifier(
+            max_depth=8,
+            min_samples_leaf=5,
+            class_weight="balanced",
+            random_state=42
+        ),
 
         "random_forest": RandomForestClassifier(
             n_estimators=50,
@@ -123,14 +134,8 @@ def train_models(X_train, y_train):
     trained = {}
 
     for name, model in models.items():
-
-        print(
-            f"\n{'=' * 50}"
-        )
-
-        print(
-            f"Training {name}..."
-        )
+        print(f"\n{'=' * 50}")
+        print(f"Training {name}...")
 
         start = time.time()
 
@@ -168,14 +173,8 @@ def train_models(X_train, y_train):
 
 
 def train_catboost(X_train, y_train):
-
-    print(
-        f"\n{'=' * 50}"
-    )
-
-    print(
-        "Training catboost..."
-    )
+    print(f"\n{'=' * 50}")
+    print("Training catboost...")
 
     start = time.time()
 

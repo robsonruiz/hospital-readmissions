@@ -1,20 +1,56 @@
 from pathlib import Path
+import sys
+import joblib
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.ml.prepare_data import (
     load_ml_data,
     prepare_data,
     print_split_summary,
 )
-from src.ml.train_models import (
-    train_models,
-    train_catboost,
-)
 from src.ml.evaluate_models import evaluate_models
 from src.ml.threshold_analysis import run_threshold_analysis
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MODELS_DIR = PROJECT_ROOT / "models"
+
+
+TUNED_MODEL_FILES = {
+    "logistic_regression": "tuned_logistic_regression.joblib",
+    "decision_tree": "tuned_decision_tree.joblib",
+    "random_forest": "tuned_random_forest.joblib",
+    "xgboost": "tuned_xgboost.joblib",
+    "lightgbm": "tuned_lightgbm.joblib",
+    "catboost": "tuned_catboost.joblib",
+}
+
+
+def load_tuned_models():
+    trained_models = {}
+
+    print("\nLoading tuned models...")
+
+    for name, filename in TUNED_MODEL_FILES.items():
+        model_path = MODELS_DIR / filename
+
+        if not model_path.exists():
+            raise FileNotFoundError(
+                f"Tuned model not found:\n  {model_path}"
+            )
+
+        print(f"  Loading {name}...")
+
+        trained_models[name] = joblib.load(
+            model_path
+        )
+
+    print("\nAll tuned models loaded successfully.")
+
+    return trained_models
 
 
 def run_ml():
@@ -22,14 +58,12 @@ def run_ml():
     print("MACHINE LEARNING PIPELINE")
     print("=" * 70)
 
-    # 1. Load data
     print("\n=== STEP 1 - Loading ML data ===")
 
     df = load_ml_data()
 
     print(f"Loaded: {len(df):,} records")
 
-    # 2. Temporal split
     print("\n=== STEP 2 - Creating temporal split ===")
 
     (
@@ -59,32 +93,17 @@ def run_ml():
     print(f"  X_valid: {X_valid.shape}")
     print(f"  X_test:  {X_test.shape}")
 
-    # 3. Train models
-    print("\n=== STEP 3 - Training models ===")
+    print("\n=== STEP 3 - Loading tuned models ===")
 
-    print("\nTraining Random Forest, XGBoost and LightGBM...")
+    trained_models = load_tuned_models()
 
-    trained_models = train_models(
-        X_train,
-        y_train,
-    )
-
-    print("\nTraining CatBoost...")
-
-    trained_models["catboost"] = train_catboost(
-        X_train,
-        y_train,
-    )
-
-    print("\nAll models trained successfully.")
-
-    # 4. Validation
-    print("\n=== STEP 4 - Evaluating models on validation set ===")
+    print("\n=== STEP 4 - Evaluating tuned models on validation set ===")
 
     validation_results = evaluate_models(
         trained_models,
         X_valid,
         y_valid,
+        threshold=0.5,
     )
 
     MODELS_DIR.mkdir(
@@ -93,7 +112,7 @@ def run_ml():
     )
 
     validation_results_path = (
-        MODELS_DIR / "validation_results.csv"
+        MODELS_DIR / "validation_results_tuned_full.csv"
     )
 
     validation_results.to_csv(
@@ -102,11 +121,11 @@ def run_ml():
     )
 
     print(
-        f"\nValidation results saved to:"
+        f"\nFull validation results saved to:"
         f"\n  {validation_results_path}"
     )
 
-    print("\nValidation results:")
+    print("\nValidation results - tuned models:")
 
     print(
         validation_results
@@ -117,7 +136,6 @@ def run_ml():
         .to_string(index=False)
     )
 
-    # 5. Threshold analysis
     print("\n=== STEP 5 - Threshold analysis ===")
 
     print(
@@ -141,15 +159,21 @@ def run_ml():
         "  models/best_thresholds_validation.csv"
     )
 
-    # 6. Test set
     print("\n=== STEP 6 - Test set ===")
 
     print(
-        "The test set was NOT used for model selection, "
-        "threshold selection or hyperparameter decisions."
+        "The test set remains completely untouched."
     )
 
-    print(f"Test records: {len(X_test):,}")
+    print(
+        "It was NOT used for:"
+        "\n  - hyperparameter tuning"
+        "\n  - model selection"
+        "\n  - threshold selection"
+        "\n  - model comparison"
+    )
+
+    print(f"\nTest records: {len(X_test):,}")
 
     print(
         f"Test positive rate: "

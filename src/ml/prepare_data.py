@@ -1,268 +1,58 @@
 from pathlib import Path
+import sys
 
-import duckdb
+import joblib
+import numpy as np
 import pandas as pd
 
-
-DB_PATH = Path("data/hospital_readmissions.duckdb")
-TARGET = "unplanned_readmitted_30d"
-
-# Columns that must not be used as predictors.
-# admission_ts is retained temporarily only to perform the temporal split.
-DROP_COLUMNS = [
-    TARGET,
-    "readmitted_30d_clean",
-    "eligible_for_readmission_model",
-    "readmitted_30d_raw",
-    "next_admission_ts",
-    "days_until_next_admission",
-    "admission_ts",
-    "discharge_ts",
-    "previous_discharge_ts",
-    "admission_month",
-    "identificador",
-]
+from sklearn.metrics import (
+    precision_score,
+    recall_score,
+    f1_score,
+    accuracy_score,
+    balanced_accuracy_score,
+    confusion_matrix,
+)
 
 
-def load_ml_data():
-    """Load the modeling dataset from DuckDB."""
-    con = duckdb.connect(DB_PATH, read_only=True)
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-    df = con.execute(
-        """
-        SELECT *
-        FROM ml_features
-        ORDER BY admission_ts
-        """
-    ).df()
-
-    con.close()
-
-    if df.empty:
-        raise ValueError("ml_features is empty.")
-
-    if TARGET not in df.columns:
-        raise ValueError(
-            f"Target column '{TARGET}' was not found in ml_features."
-        )
-
-    if "admission_ts" not in df.columns:
-        raise ValueError(
-            "Column 'admission_ts' is required for temporal splitting."
-        )
-
-    df["admission_ts"] = pd.to_datetime(
-        df["admission_ts"],
-        errors="coerce"
-    )
-
-    missing_dates = df["admission_ts"].isna().sum()
-
-    if missing_dates > 0:
-        raise ValueError(
-            f"{missing_dates} records have invalid/missing admission_ts. "
-            "Temporal splitting cannot be performed safely."
-        )
-
-    df[TARGET] = pd.to_numeric(
-        df[TARGET],
-        errors="coerce"
-    )
-
-    if df[TARGET].isna().any():
-        raise ValueError(
-            f"Target '{TARGET}' contains missing values."
-        )
-
-    df[TARGET] = df[TARGET].astype(int)
-
-    if not set(df[TARGET].unique()).issubset({0, 1}):
-        raise ValueError(
-            f"Target '{TARGET}' must contain only 0 and 1."
-        )
-
-    return df
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 
-def _get_temporal_cutoffs(df):
+MODELS_DIR = PROJECT_ROOT / "models"
+
+CALIBRATED_MODEL_PATH = (
+    MODELS_DIR / "calibrated_catboost_sigmoid.joblib"
+)
+
+THRESHOLD_RESULTS_PATH = (
+    MODELS_DIR / "calibrated_threshold_analysis_validation.csv"
+)
+
+BEST_THRESHOLD_PATH = (
+    MODELS_DIR / "best_calibrated_threshold_validation.csv"
+)
+
+
+def load_validation_data():
     """
-    Determine temporal cutoffs close to 70% / 15% / 15%.
-
-    The cutoffs are based on row positions after chronological sorting,
-    but they are moved to the end of the corresponding calendar date.
-    This prevents records from the same date from being split between
-    different datasets.
+    Load ml_features and create the same temporal split
+    used by the machine learning pipeline.
     """
-    dates = df["admission_ts"].dt.normalize()
-
-    n = len(df)
-
-    train_position = max(1, int(n * 0.70)) - 1
-    validation_position = max(1, int(n * 0.85)) - 1
-
-    train_cutoff_date = dates.iloc[train_position]
-    validation_cutoff_date = dates.iloc[validation_position]
-
-    # If both positions fall on the same date, move the validation
-    # boundary forward to the next available date.
-    if validation_cutoff_date <= train_cutoff_date:
-        unique_dates = dates.drop_duplicates().sort_values().reset_index(drop=True)
-
-        train_idx = unique_dates.searchsorted(train_cutoff_date)
-        valid_idx = min(train_idx + 1, len(unique_dates) - 1)
-
-        train_cutoff_date = unique_dates.iloc[train_idx]
-        validation_cutoff_date = unique_dates.iloc[valid_idx]
-
-    return train_cutoff_date, validation_cutoff_date
-
-
-def prepare_data(df):
-    """
-    Perform a chronological train/validation/test split.
-
-    Approximate proportions:
-        Train      ~70%
-        Validation ~15%
-        Test       ~15%
-
-    The split is temporal, not random.
-    """
-    df = df.sort_values("admission_ts").reset_index(drop=True).copy()
-
-    train_cutoff, validation_cutoff = _get_temporal_cutoffs(df)
-
-    dates = df["admission_ts"].dt.normalize()
-
-    train_mask = dates <= train_cutoff
-    validation_mask = (
-        (dates > train_cutoff)
-        & (dates <= validation_cutoff)
-    )
-    test_mask = dates > validation_cutoff
-
-    train_df = df.loc[train_mask].copy()
-    validation_df = df.loc[validation_mask].copy()
-    test_df = df.loc[test_mask].copy()
-
-    if train_df.empty or validation_df.empty or test_df.empty:
-        raise ValueError(
-            "Temporal split produced an empty dataset. "
-            "Check the date distribution in ml_features."
-        )
-
-    # Keep admission_ts available only for diagnostics.
-    # It is removed from the actual model features below.
-    y_train = train_df[TARGET].copy()
-    y_valid = validation_df[TARGET].copy()
-    y_test = test_df[TARGET].copy()
-
-    X_train = train_df.drop(
-        columns=[c for c in DROP_COLUMNS if c in train_df.columns]
-    )
-    X_valid = validation_df.drop(
-        columns=[c for c in DROP_COLUMNS if c in validation_df.columns]
-    )
-    X_test = test_df.drop(
-        columns=[c for c in DROP_COLUMNS if c in test_df.columns]
+    from src.ml.prepare_data import (
+        load_ml_data,
+        prepare_data,
     )
 
-    # Final safety check: the target must never remain in X.
-    for X, name in [
-        (X_train, "X_train"),
-        (X_valid, "X_valid"),
-        (X_test, "X_test"),
-    ]:
-        if TARGET in X.columns:
-            raise ValueError(
-                f"Target leakage detected: '{TARGET}' is present in {name}."
-            )
+    print("   Loading ml_features...")
 
-    return (
-        X_train,
-        X_valid,
-        X_test,
-        y_train,
-        y_valid,
-        y_test,
-        train_df,
-        validation_df,
-        test_df,
-        train_cutoff,
-        validation_cutoff,
-    )
-
-
-def print_split_summary(
-    train_df,
-    validation_df,
-    test_df,
-    train_cutoff,
-    validation_cutoff,
-):
-    """Print the temporal split and target prevalence."""
-    print("\n" + "=" * 70)
-    print("TEMPORAL TRAIN / VALIDATION / TEST SPLIT")
-    print("=" * 70)
-
-    datasets = [
-        ("TRAIN", train_df),
-        ("VALIDATION", validation_df),
-        ("TEST", test_df),
-    ]
-
-    total = len(train_df) + len(validation_df) + len(test_df)
-
-    for name, data in datasets:
-        start = data["admission_ts"].min().date()
-        end = data["admission_ts"].max().date()
-        n = len(data)
-        positives = int(data[TARGET].sum())
-        prevalence = data[TARGET].mean() * 100
-
-        print(f"\n{name}")
-        print(f"  Period: {start} -> {end}")
-        print(f"  Records: {n:,}")
-        print(f"  Positive: {positives:,}")
-        print(f"  Negative: {n - positives:,}")
-        print(f"  Positive rate: {prevalence:.2f}%")
-        print(f"  Share of total: {n / total * 100:.2f}%")
-
-    print("\n" + "-" * 70)
-    print(f"Train cutoff:      {train_cutoff.date()}")
-    print(f"Validation cutoff: {validation_cutoff.date()}")
-    print("-" * 70)
-
-    # Explicit chronological safety checks.
-    train_max = train_df["admission_ts"].max()
-    valid_min = validation_df["admission_ts"].min()
-    valid_max = validation_df["admission_ts"].max()
-    test_min = test_df["admission_ts"].min()
-
-    print("\nChronological checks:")
-    print(f"  Train max < Validation min: {train_max < valid_min}")
-    print(f"  Validation max < Test min:  {valid_max < test_min}")
-
-    if not (train_max < valid_min and valid_max < test_min):
-        raise ValueError(
-            "Temporal ordering check failed."
-        )
-
-    print("=" * 70)
-
-
-def main():
-    print("1 - Loading ml_features...")
     df = load_ml_data()
 
-    print(f"Loaded: {len(df):,} records")
     print(
-        f"Date range: "
-        f"{df['admission_ts'].min().date()} -> "
-        f"{df['admission_ts'].max().date()}"
+        f"   Loaded {len(df):,} records."
     )
-
-    print("\n2 - Creating temporal split...")
 
     (
         X_train,
@@ -278,26 +68,481 @@ def main():
         validation_cutoff,
     ) = prepare_data(df)
 
-    print_split_summary(
-        train_df,
-        validation_df,
-        test_df,
-        train_cutoff,
-        validation_cutoff,
+    print(
+        f"   X_valid shape: {X_valid.shape}"
     )
 
-    print("\nFeature shapes:")
-    print(f"  X_train: {X_train.shape}")
-    print(f"  X_valid: {X_valid.shape}")
-    print(f"  X_test:  {X_test.shape}")
+    print(
+        f"   Validation period: "
+        f"{validation_df['admission_ts'].min().date()} "
+        f"-> "
+        f"{validation_df['admission_ts'].max().date()}"
+    )
 
-    return (
-        X_train,
+    print(
+        f"   Validation records: {len(X_valid):,}"
+    )
+
+    print(
+        f"   Validation positives: "
+        f"{int(y_valid.sum()):,}"
+    )
+
+    print(
+        f"   Validation positive rate: "
+        f"{y_valid.mean() * 100:.2f}%"
+    )
+
+    return X_valid, y_valid
+
+def load_calibrated_model():
+    """
+    Load the CatBoost + sigmoid calibrated model.
+    """
+    if not CALIBRATED_MODEL_PATH.exists():
+        raise FileNotFoundError(
+            f"\nCalibrated model not found:\n"
+            f"{CALIBRATED_MODEL_PATH}\n\n"
+            "Check the filename generated by "
+            "calibration_analysis.py."
+        )
+
+    print(
+        f"   Loading: "
+        f"{CALIBRATED_MODEL_PATH.name}"
+    )
+
+    model = joblib.load(
+        CALIBRATED_MODEL_PATH
+    )
+
+    if not hasattr(model, "predict_proba"):
+        raise TypeError(
+            "The calibrated model does not have "
+            "'predict_proba'."
+        )
+
+    return model
+
+
+def predict_calibrated_probability(model, X_valid):
+    """
+    Generate calibrated positive-class probabilities.
+    """
+    probability = model.predict_proba(
+        X_valid
+    )
+
+    if probability.ndim != 2:
+        raise ValueError(
+            "predict_proba() did not return a 2D array."
+        )
+
+    if probability.shape[1] < 2:
+        raise ValueError(
+            "predict_proba() does not contain "
+            "probabilities for two classes."
+        )
+
+    probability = probability[:, 1]
+
+    if not np.isfinite(probability).all():
+        raise ValueError(
+            "Calibrated probabilities contain "
+            "NaN or infinite values."
+        )
+
+    return probability
+
+
+def calculate_metrics(
+    y_true,
+    probability,
+    threshold,
+):
+    """
+    Calculate classification metrics for one threshold.
+    """
+    prediction = (
+        probability >= threshold
+    ).astype(int)
+
+    tn, fp, fn, tp = confusion_matrix(
+        y_true,
+        prediction,
+        labels=[0, 1],
+    ).ravel()
+
+    precision = precision_score(
+        y_true,
+        prediction,
+        zero_division=0,
+    )
+
+    recall = recall_score(
+        y_true,
+        prediction,
+        zero_division=0,
+    )
+
+    f1 = f1_score(
+        y_true,
+        prediction,
+        zero_division=0,
+    )
+
+    accuracy = accuracy_score(
+        y_true,
+        prediction,
+    )
+
+    balanced_accuracy = balanced_accuracy_score(
+        y_true,
+        prediction,
+    )
+
+    specificity = (
+        tn / (tn + fp)
+        if (tn + fp) > 0
+        else 0.0
+    )
+
+    return {
+        "threshold": threshold,
+        "precision": precision,
+        "recall": recall,
+        "specificity": specificity,
+        "f1": f1,
+        "accuracy": accuracy,
+        "balanced_accuracy": balanced_accuracy,
+        "tn": int(tn),
+        "fp": int(fp),
+        "fn": int(fn),
+        "tp": int(tp),
+    }
+
+
+def run_threshold_analysis(
+    y_valid,
+    probability,
+):
+    """
+    Evaluate thresholds from 0.05 to 0.95
+    with increments of 0.01.
+    """
+    thresholds = np.round(
+        np.arange(
+            0.05,
+            0.951,
+            0.01,
+        ),
+        2,
+    )
+
+    results = []
+
+    for threshold in thresholds:
+        metrics = calculate_metrics(
+            y_valid,
+            probability,
+            threshold,
+        )
+
+        results.append(metrics)
+
+    return pd.DataFrame(results)
+
+
+def select_best_threshold(results_df):
+    """
+    Select the threshold with the highest F1.
+
+    Tie-breakers:
+    1. higher recall
+    2. higher specificity
+    """
+    ranked = results_df.sort_values(
+        by=[
+            "f1",
+            "recall",
+            "specificity",
+        ],
+        ascending=[
+            False,
+            False,
+            False,
+        ],
+    ).reset_index(drop=True)
+
+    return ranked.iloc[0]
+
+
+def save_results(
+    results_df,
+    best_result,
+):
+    """
+    Save complete threshold analysis and
+    best threshold.
+    """
+    MODELS_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    results_df.to_csv(
+        THRESHOLD_RESULTS_PATH,
+        index=False,
+    )
+
+    best_df = pd.DataFrame(
+        [best_result]
+    )
+
+    best_df.to_csv(
+        BEST_THRESHOLD_PATH,
+        index=False,
+    )
+
+
+def print_results(
+    results_df,
+    best_result,
+    y_valid,
+    probability,
+):
+    """
+    Print a concise summary of the analysis.
+    """
+    print()
+    print("=" * 70)
+    print(
+        "CATBOOST + SIGMOID — "
+        "CALIBRATED THRESHOLD ANALYSIS"
+    )
+    print("=" * 70)
+
+    print()
+    print(
+        f"Validation records: "
+        f"{len(y_valid):,}"
+    )
+
+    print(
+        f"Observed positive rate: "
+        f"{y_valid.mean() * 100:.2f}%"
+    )
+
+    print()
+    print(
+        "Probability distribution:"
+    )
+
+    print(
+        f"  Minimum: "
+        f"{probability.min():.6f}"
+    )
+
+    print(
+        f"  Maximum: "
+        f"{probability.max():.6f}"
+    )
+
+    print(
+        f"  Mean:    "
+        f"{probability.mean():.6f}"
+    )
+
+    print()
+    print("-" * 70)
+    print("BEST THRESHOLD")
+    print("-" * 70)
+
+    print(
+        f"\nThreshold: "
+        f"{best_result['threshold']:.2f}"
+    )
+
+    print()
+    print(
+        f"Precision:          "
+        f"{best_result['precision']:.4f}"
+    )
+
+    print(
+        f"Recall:             "
+        f"{best_result['recall']:.4f}"
+    )
+
+    print(
+        f"Specificity:        "
+        f"{best_result['specificity']:.4f}"
+    )
+
+    print(
+        f"F1:                 "
+        f"{best_result['f1']:.4f}"
+    )
+
+    print(
+        f"Accuracy:           "
+        f"{best_result['accuracy']:.4f}"
+    )
+
+    print(
+        f"Balanced Accuracy:  "
+        f"{best_result['balanced_accuracy']:.4f}"
+    )
+
+    print()
+    print("Confusion matrix:")
+
+    print(
+        f"  TN: {best_result['tn']:,}"
+    )
+
+    print(
+        f"  FP: {best_result['fp']:,}"
+    )
+
+    print(
+        f"  FN: {best_result['fn']:,}"
+    )
+
+    print(
+        f"  TP: {best_result['tp']:,}"
+    )
+
+    print()
+    print("-" * 70)
+    print("TOP 10 THRESHOLDS BY F1")
+    print("-" * 70)
+
+    display_columns = [
+        "threshold",
+        "precision",
+        "recall",
+        "specificity",
+        "f1",
+        "balanced_accuracy",
+    ]
+
+    top_10 = (
+        results_df
+        .sort_values(
+            by="f1",
+            ascending=False,
+        )
+        .head(10)
+    )
+
+    print()
+
+    print(
+        top_10[display_columns].to_string(
+            index=False,
+            float_format=lambda x: f"{x:.4f}",
+        )
+    )
+
+    print()
+    print("-" * 70)
+    print("FILES SAVED")
+    print("-" * 70)
+
+    print(
+        f"\n{THRESHOLD_RESULTS_PATH}"
+    )
+
+    print(
+        f"{BEST_THRESHOLD_PATH}"
+    )
+
+    print()
+    print(
+        "TEST was NOT used to select the threshold."
+    )
+
+    print("=" * 70)
+    print()
+
+
+def main():
+    print()
+    print("=" * 70)
+    print(
+        "CALIBRATED THRESHOLD ANALYSIS"
+    )
+    print("=" * 70)
+
+    print()
+    print(
+        "1 - Loading validation data..."
+    )
+
+    X_valid, y_valid = load_validation_data()
+
+    print()
+    print(
+        "2 - Loading calibrated CatBoost + sigmoid..."
+    )
+
+    model = load_calibrated_model()
+
+    print()
+    print(
+        "3 - Generating calibrated probabilities..."
+    )
+
+    probability = predict_calibrated_probability(
+        model,
         X_valid,
-        X_test,
-        y_train,
+    )
+
+    print(
+        f"   Generated {len(probability):,} "
+        "probabilities."
+    )
+
+    print()
+    print(
+        "4 - Evaluating thresholds..."
+    )
+
+    results_df = run_threshold_analysis(
         y_valid,
-        y_test,
+        probability,
+    )
+
+    print(
+        f"   Evaluated "
+        f"{len(results_df)} thresholds."
+    )
+
+    print()
+    print(
+        "5 - Selecting best threshold..."
+    )
+
+    best_result = select_best_threshold(
+        results_df
+    )
+
+    print()
+    print(
+        "6 - Saving results..."
+    )
+
+    save_results(
+        results_df,
+        best_result,
+    )
+
+    print_results(
+        results_df,
+        best_result,
+        y_valid,
+        probability,
     )
 
 

@@ -11,7 +11,7 @@ import streamlit as st
 MODELS_DIR = Path("models")
 
 VALIDATION_RESULTS = (
-    MODELS_DIR / "validation_results.csv"
+    MODELS_DIR / "validation_results_tuned_full.csv"
 )
 
 THRESHOLD_RESULTS = (
@@ -50,7 +50,6 @@ st.caption(
 
 @st.cache_data
 def load_validation_results():
-
     if not VALIDATION_RESULTS.exists():
         return None
 
@@ -61,7 +60,6 @@ def load_validation_results():
 
 @st.cache_data
 def load_threshold_results():
-
     if not THRESHOLD_RESULTS.exists():
         return None
 
@@ -72,7 +70,6 @@ def load_threshold_results():
 
 @st.cache_data
 def load_best_thresholds():
-
     if not BEST_THRESHOLDS.exists():
         return None
 
@@ -81,17 +78,11 @@ def load_best_thresholds():
     )
 
 
-validation_results = (
-    load_validation_results()
-)
+validation_results = load_validation_results()
 
-threshold_results = (
-    load_threshold_results()
-)
+threshold_results = load_threshold_results()
 
-best_thresholds = (
-    load_best_thresholds()
-)
+best_thresholds = load_best_thresholds()
 
 
 # ==============================================================
@@ -102,12 +93,13 @@ if validation_results is None:
 
     st.error(
         "O arquivo "
-        "models/validation_results.csv "
+        "models/validation_results_tuned_full.csv "
         "não foi encontrado."
     )
 
     st.info(
-        "Execute primeiro o treinamento dos modelos."
+        "Execute primeiro o pipeline de Machine Learning "
+        "para gerar os resultados dos modelos tunados."
     )
 
     st.stop()
@@ -118,6 +110,13 @@ if validation_results is None:
 # ==============================================================
 
 MODEL_NAMES = {
+    "logistic_regression": "Logistic Regression",
+    "logistic regression": "Logistic Regression",
+    "lr": "Logistic Regression",
+
+    "decision_tree": "Decision Tree",
+    "decision tree": "Decision Tree",
+    "dt": "Decision Tree",
 
     "random_forest": "Random Forest",
     "random forest": "Random Forest",
@@ -170,7 +169,7 @@ else:
 
     st.error(
         "A coluna 'model' não foi encontrada "
-        "em validation_results.csv."
+        "em validation_results_tuned_full.csv."
     )
 
     st.stop()
@@ -181,7 +180,6 @@ else:
 # ==============================================================
 
 METRIC_LABELS = {
-
     "roc_auc": "ROC-AUC",
     "pr_auc": "PR-AUC",
     "precision": "Precision",
@@ -195,7 +193,6 @@ METRIC_LABELS = {
 
 
 METRIC_DIRECTION = {
-
     "roc_auc": "max",
     "pr_auc": "max",
     "precision": "max",
@@ -284,7 +281,7 @@ tab_models, tab_threshold = (
     st.tabs(
         [
             "Comparação dos modelos",
-            "Threshold"
+            "Threshold",
         ]
     )
 )
@@ -301,10 +298,10 @@ with tab_models:
     )
 
     st.write(
-        "Resultados obtidos no conjunto de "
-        "validação temporal. Os valores em "
-        "negrito representam o melhor resultado "
-        "observado entre os modelos para cada métrica."
+        "Resultados dos modelos tunados obtidos no conjunto "
+        "de validação temporal. Os valores em negrito "
+        "representam o melhor resultado observado entre "
+        "os modelos para cada métrica."
     )
 
     # ----------------------------------------------------------
