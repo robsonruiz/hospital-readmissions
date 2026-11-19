@@ -48,11 +48,10 @@ N_ITER = 10
 TARGET = "unplanned_readmitted_30d"
 
 DATASETS = {
-    "A_baseline": "dataset_A_baseline.parquet",
-    "B_trajectory": "dataset_B_trajectory.parquet",
-    "C_aps": "dataset_C_aps.parquet",
+    "A_baseline": "a_baseline.parquet",
+    "B_trajectory": "b_trajectory.parquet",
+    "C_aps": "c_aps.parquet",
 }
-
 
 def load_dataset(path: Path) -> pd.DataFrame:
     print(f"  Loading: {path.name}", flush=True)

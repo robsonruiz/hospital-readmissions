@@ -1,4 +1,4 @@
 {
-  "model__solver": "liblinear",
+  "model__solver": "lbfgs",
   "model__C": 0.001
 }
