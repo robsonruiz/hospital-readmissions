@@ -6,7 +6,9 @@ TARGET_COLUMN = "unplanned_readmitted_30d"
 
 
 def show_metrics(df: pd.DataFrame) -> None:
-    """Display dashboard KPIs for eligible episodes."""
+    """
+    Display compact dashboard KPIs.
+    """
 
     if TARGET_COLUMN not in df.columns:
         st.error(
@@ -23,7 +25,7 @@ def show_metrics(df: pd.DataFrame) -> None:
         unplanned_readmissions
         / total_episodes
         * 100
-        if total_episodes
+        if total_episodes > 0
         else 0.0
     )
 
@@ -48,88 +50,125 @@ def show_metrics(df: pd.DataFrame) -> None:
         else float("nan")
     )
 
-    average_previous_hospitalizations = (
-        df["previous_hospitalizations"].mean()
-        if "previous_hospitalizations" in df.columns
-        else float("nan")
+    average_los_text = (
+        f"{average_los:.1f} days"
+        if pd.notna(average_los)
+        else "-"
     )
 
-    average_previous_unplanned = (
-        df["previous_unplanned_readmissions"].mean()
-        if "previous_unplanned_readmissions"
-        in df.columns
-        else float("nan")
-    )
+    # Custom KPI cards are rendered with st.html so the HTML is never
+    # interpreted as Markdown/code. The title and value are intentionally
+    # close together, and all cards have a solid white background.
+    html = f"""
+<style>
+.kpi-row {{
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 14px;
+    margin: 0 0 14px 0;
+    width: 100%;
+}}
+.kpi-card {{
+    background: #ffffff;
+    border: 1px solid #d9dee7;
+    border-radius: 8px;
+    min-height: 92px;
+    padding: 11px 14px 10px 14px;
+    box-sizing: border-box;
+}}
+.kpi-title {{
+    color: #687386;
+    font-size: 12px;
+    line-height: 1;
+    font-weight: 500;
+    margin: 0;
+    padding: 0;
+}}
+.kpi-value {{
+    color: #111827;
+    font-size: 25px;
+    line-height: 1;
+    font-weight: 750;
+    margin: 0;
+    letter-spacing: -0.4px;
+}}
+.kpi-combined {{
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 12px;
+    margin: 0;
+}}
+.kpi-main {{
+    color: #111827;
+    font-size: 25px;
+    line-height: 1;
+    font-weight: 750;
+    margin: 0;
+    letter-spacing: -0.4px;
+}}
+.kpi-secondary {{
+    color: #3157d5;
+    font-size: 23px;
+    line-height: 1;
+    font-weight: 750;
+    margin: 0;
+    text-align: right;
+    white-space: nowrap;
+}}
+.kpi-secondary-label {{
+    color: #7b8492;
+    font-size: 10px;
+    line-height: 1;
+    font-weight: 600;
+    margin: 0 0 4px 0;
+    text-align: right;
+    letter-spacing: 0.15px;
+}}
+</style>
 
-    average_last365 = (
-        df["admissions_last_365d"].mean()
-        if "admissions_last_365d" in df.columns
-        else float("nan")
-    )
+<div class="kpi-row">
+    <div class="kpi-card">
+        <div class="kpi-title">Hospitalization Episodes</div>
+        <div class="kpi-value">{total_episodes:,}</div>
+    </div>
 
-    c1, c2, c3 = st.columns(3)
+    <div class="kpi-card">
+        <div class="kpi-title">Unplanned Readmissions</div>
+        <div class="kpi-combined">
+            <div class="kpi-main">{unplanned_readmissions:,}</div>
+            <div>
+                <div class="kpi-secondary-label">RATE</div>
+                <div class="kpi-secondary">{readmission_rate:.2f}%</div>
+            </div>
+        </div>
+    </div>
 
-    c1.metric(
-        "Hospitalization Episodes",
-        f"{total_episodes:,}",
-    )
-    c2.metric(
-        "Unplanned Readmissions",
-        f"{unplanned_readmissions:,}",
-    )
-    c3.metric(
-        "Unplanned Readmission Rate",
-        f"{readmission_rate:.2f}%",
-    )
+    <div class="kpi-card">
+        <div class="kpi-title">Unique Patients</div>
+        <div class="kpi-combined">
+            <div class="kpi-main">{unique_patients:,}</div>
+            <div>
+                <div class="kpi-secondary-label">WITH READMISSION</div>
+                <div class="kpi-secondary">{readmitted_patients:,}</div>
+            </div>
+        </div>
+    </div>
 
-    c4, c5, c6 = st.columns(3)
+    <div class="kpi-card">
+        <div class="kpi-title">Average Length of Stay</div>
+        <div class="kpi-value">{average_los_text}</div>
+    </div>
+</div>
+"""
 
-    c4.metric(
-        "Unique Patients",
-        f"{unique_patients:,}",
-    )
-    c5.metric(
-        "Patients with Unplanned Readmission",
-        f"{readmitted_patients:,}",
-    )
-    c6.metric(
-        "Average Length of Stay",
-        (
-            f"{average_los:.1f} days"
-            if pd.notna(average_los)
-            else "-"
-        ),
-    )
-
-    c7, c8, c9 = st.columns(3)
-
-    c7.metric(
-        "Avg Previous Hospitalizations",
-        (
-            f"{average_previous_hospitalizations:.2f}"
-            if pd.notna(
-                average_previous_hospitalizations
-            )
-            else "-"
-        ),
-    )
-    c8.metric(
-        "Avg Previous Unplanned Readmissions",
-        (
-            f"{average_previous_unplanned:.2f}"
-            if pd.notna(
-                average_previous_unplanned
-            )
-            else "-"
-        ),
-    )
-    c9.metric(
-        "Avg Admissions (Last 365 Days)",
-        (
-            f"{average_last365:.2f}"
-            if pd.notna(average_last365)
-            else "-"
-        ),
-    )
+    if hasattr(st, "html"):
+        st.html(html)
+    else:
+        st.markdown(
+            html.replace("<style>", "").replace("</style>", ""),
+            unsafe_allow_html=True,
+        )
 
     st.divider()
+

@@ -1,773 +1,1112 @@
+from pathlib import Path
+import streamlit as st
+import duckdb
 import pandas as pd
 import plotly.express as px
-import streamlit as st
+import plotly.graph_objects as go
 
+# ==========================================================
+# Dashboard enrichment
+# ==========================================================
 
-TARGET_COLUMN = "unplanned_readmitted_30d"
+def enrich_discharge_columns(df):
+    required = {
+        "motivoalta",
+        "eligible_for_readmission_model",
+    }
 
-def apply_chart_font(fig) -> None:
-    fig.update_layout(
-        font=dict(size=16),
-        title=dict(font=dict(size=21)),
-        legend=dict(
-            font=dict(size=14),
-            title=dict(font=dict(size=15)),
-        ),
-        uniformtext=dict(
-            minsize=9,
-            mode="hide",
-        ),
+    if required.issubset(df.columns):
+        return df
+
+    project_root = Path(__file__).resolve().parents[2]
+    db_path = (
+        project_root
+        / "data"
+        / "hospital_readmissions.duckdb"
     )
 
-    fig.update_xaxes(
-        title_font=dict(size=16),
-        tickfont=dict(size=13),
-    )
+    if not db_path.exists():
+        return df
 
-    fig.update_yaxes(
-        title_font=dict(size=16),
-        tickfont=dict(size=13),
-    )
+    if "identificador" not in df.columns:
+        return df
 
-    # Somente os valores sobre as barras
-    fig.update_traces(
-        textfont_size=10,
-        selector=dict(type="bar"),
-    )
+    if "admission_ts" not in df.columns:
+        return df
 
-    # Somente os valores dos gráficos de pizza
-    fig.update_traces(
-        textfont_size=10,
-        selector=dict(type="pie"),
-    )
-
-def _has_columns(
-    df: pd.DataFrame,
-    *columns: str,
-) -> bool:
-    missing = [
+    missing_columns = [
         column
-        for column in columns
+        for column in [
+            "motivoalta",
+            "eligible_for_readmission_model",
+        ]
         if column not in df.columns
     ]
 
-    if missing:
-        st.info(
-            "Missing columns: "
-            + ", ".join(missing)
-        )
-        return False
+    if not missing_columns:
+        return df
 
-    return True
+    select_columns = [
+        "identificador",
+        "admission_ts",
+        *missing_columns,
+    ]
 
-
-def _rate_table(
-    df: pd.DataFrame,
-    group: str,
-    min_episodes: int = 0,
-) -> pd.DataFrame:
-    result = (
-        df.assign(
-            **{
-                group: df[group].fillna(
-                    "Not informed"
-                )
-            }
-        )
-        .groupby(group, dropna=False)
-        .agg(
-            episodes=(TARGET_COLUMN, "size"),
-            readmissions=(TARGET_COLUMN, "sum"),
-        )
-        .reset_index()
-    )
-
-    result = result[
-        result["episodes"] >= min_episodes
-    ].copy()
-
-    result["rate"] = (
-        result["readmissions"]
-        / result["episodes"]
-        * 100
-    )
-
-    return result
-
-
-def _bar_rate(
-    data: pd.DataFrame,
-    category: str,
-    title: str,
-    category_label: str,
-    top_n: int | None = None,
-    overall_rate: float | None = None,
-    height: int = 600,
-) -> None:
-    if top_n is not None:
-        data = data.head(top_n)
-
-    if data.empty:
-        st.info("No data available for this chart.")
-        return
-
-    fig = px.bar(
-        data,
-        x="rate",
-        y=category,
-        orientation="h",
-        text="episodes",
-        title=title,
-        labels={
-            "rate":
-                "Unplanned readmission rate (%)",
-            category: category_label,
-            "episodes": "Episodes",
-            "readmissions":
-                "Unplanned readmissions",
-        },
-        hover_data={
-            "episodes": ":,",
-            "readmissions": ":,",
-            "rate": ":.2f",
-        },
-    )
-
-    fig.update_traces(
-        texttemplate="%{text:,}",
-        textposition="outside",
-    )
-
-    if overall_rate is not None:
-        fig.add_vline(
-            x=overall_rate,
-            line_dash="dash",
-            annotation_text=(
-                f"Overall ({overall_rate:.1f}%)"
-            ),
+    try:
+        connection = duckdb.connect(
+            str(db_path),
+            read_only=True,
         )
 
-    fig.update_layout(
-        yaxis={
-            "categoryorder": "total ascending",
-            "title": None,
-        },
-        height=height,
+        try:
+            enrichment = connection.execute(
+                f"""
+                SELECT
+                    {", ".join(select_columns)}
+                FROM hospitalization_target_unplanned
+                """
+            ).df()
+        finally:
+            connection.close()
+    except Exception:
+        return df
+
+    enrichment["admission_ts"] = pd.to_datetime(
+        enrichment["admission_ts"],
+        errors="coerce",
     )
 
-    apply_chart_font(fig)
+    enriched = df.copy()
+    enriched["admission_ts"] = pd.to_datetime(
+        enriched["admission_ts"],
+        errors="coerce",
+    )
 
-    apply_chart_font(fig)
+    enrichment = enrichment.drop_duplicates(
+        subset=["identificador", "admission_ts"]
+    )
 
+    enriched = enriched.merge(
+        enrichment,
+        on=["identificador", "admission_ts"],
+        how="left",
+        suffixes=("", "_target"),
+    )
+
+    for column in missing_columns:
+        target_column = f"{column}_target"
+
+        if target_column in enriched.columns:
+            enriched[column] = enriched[target_column]
+            enriched = enriched.drop(
+                columns=[target_column]
+            )
+
+    return enriched
+
+
+# ==========================================================
+# Target column
+# ==========================================================
+
+def get_target_column(df):
+    if "unplanned_readmitted_30d" in df.columns:
+        return "unplanned_readmitted_30d"
+
+    if "readmitted_30d_clean" in df.columns:
+        return "readmitted_30d_clean"
+
+    raise KeyError(
+        "No readmission target column found. "
+        "Expected 'unplanned_readmitted_30d' or "
+        "'readmitted_30d_clean'."
+    )
+
+
+# ==========================================================
+# Visual theme
+# ==========================================================
+
+PALETTE = [
+    "#3157D5",
+    "#3F6FE5",
+    "#5A86E8",
+    "#79A0EC",
+    "#9AB8F1",
+    "#BCD0F6",
+]
+
+LIGHT_HEATMAP = [
+    [0.00, "#F4F7FB"],
+    [0.15, "#E3EBFA"],
+    [0.35, "#C5D6F5"],
+    [0.55, "#9FB9EE"],
+    [0.75, "#6F91E4"],
+    [1.00, "#3157D5"],
+]
+
+def show_chart(fig):
+    """
+    Render a Plotly chart with a white outer surface while preserving
+    the existing spacing and chart dimensions.
+    """
+    st.markdown(
+        """
+        <style>
+        [data-testid="stPlotlyChart"] {
+            background: #FFFFFF !important;
+        }
+        [data-testid="stPlotlyChart"] > div {
+            background: #FFFFFF !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
     st.plotly_chart(
         fig,
         use_container_width=True,
     )
 
 
-def prepare_specialty(
-    df: pd.DataFrame,
-    min_episodes: int,
-) -> pd.DataFrame:
-    return _rate_table(
-        df,
-        "especialidade",
-        min_episodes,
-    ).sort_values(
-        "rate",
-        ascending=False,
+def apply_chart_theme(fig, height=None):
+    layout = dict(
+        paper_bgcolor="#FFFFFF",
+        plot_bgcolor="#FFFFFF",
+        font=dict(
+            family="Inter, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif",
+            color="#202532",
+            size=12,
+        ),
+        title=dict(
+            font=dict(size=16, color="#151922"),
+            x=0.02,
+            xanchor="left",
+            y=0.96,
+        ),
+        margin=dict(l=56, r=28, t=58, b=48),
+        hoverlabel=dict(
+            bgcolor="#FFFFFF",
+            bordercolor="#E2E7EF",
+            font=dict(color="#202532"),
+        ),
     )
-
-
-def prepare_hospital(
-    df: pd.DataFrame,
-    min_episodes: int,
-) -> pd.DataFrame:
-    return _rate_table(
-        df,
-        "executante",
-        min_episodes,
-    ).sort_values(
-        "rate",
-        ascending=False,
+    if height is not None:
+        layout["height"] = height
+    fig.update_layout(**layout)
+    fig.update_xaxes(
+        showgrid=True,
+        gridcolor="#E8ECF2",
+        zeroline=False,
+        linecolor="#DDE2EA",
+        tickfont=dict(color="#697386", size=10),
+        title_font=dict(color="#697386", size=11),
     )
+    fig.update_yaxes(
+        showgrid=True,
+        gridcolor="#E8ECF2",
+        zeroline=False,
+        linecolor="#DDE2EA",
+        tickfont=dict(color="#697386", size=10),
+        title_font=dict(color="#697386", size=11),
+    )
+    return fig
 
 
-def prepare_monthly(
-    df: pd.DataFrame,
-) -> pd.DataFrame:
-    return _rate_table(
-        df,
-        "admission_month",
-    ).sort_values("admission_month")
+# ==========================================================
+# Helpers
+# ==========================================================
 
-
-def prepare_quarterly(
-    df: pd.DataFrame,
-) -> pd.DataFrame:
-    data = (
-        df.groupby(
-            [
-                "admission_year",
-                "admission_quarter",
-            ]
-        )
+def prepare_specialty(df, min_episodes):
+    specialty = (
+        df.groupby("especialidade")
         .agg(
-            episodes=(TARGET_COLUMN, "size"),
-            readmissions=(TARGET_COLUMN, "sum"),
+            episodes=(get_target_column(df), "count"),
+            readmissions=(get_target_column(df), "sum")
         )
         .reset_index()
-        .sort_values(
-            [
-                "admission_year",
-                "admission_quarter",
-            ]
-        )
     )
 
-    data["rate"] = (
-        data["readmissions"]
-        / data["episodes"]
+    specialty["rate"] = (
+        specialty["readmissions"]
+        / specialty["episodes"]
         * 100
     )
 
-    data["quarter"] = (
-        data["admission_year"]
-        .astype(int)
-        .astype(str)
-        + " Q"
-        + data["admission_quarter"]
-        .astype(int)
-        .astype(str)
+    specialty = specialty[
+        specialty["episodes"] >= min_episodes
+    ]
+
+    specialty = specialty.sort_values(
+        "rate",
+        ascending=False
     )
 
-    return data
+    return specialty
 
 
-def show_kpi_cards(
-    df: pd.DataFrame,
-) -> None:
-    """
-    Compatibility function. Prefer show_metrics()
-    from metrics.py.
-    """
+def prepare_hospital(df, min_episodes):
 
-    if not _has_columns(
-        df,
-        TARGET_COLUMN,
-        "length_of_stay_days",
-        "previous_hospitalizations",
-        "previous_unplanned_readmissions",
-        "admissions_last_365d",
-    ):
-        return
+    hospital = (
+        df.groupby("executante")
+        .agg(
+            episodes=(get_target_column(df), "count"),
+            readmissions=(get_target_column(df), "sum")
+        )
+        .reset_index()
+    )
 
-    total = len(df)
-    positives = int(df[TARGET_COLUMN].sum())
-    rate = positives / total * 100 if total else 0
+    hospital["rate"] = (
+        hospital["readmissions"]
+        / hospital["episodes"]
+        * 100
+    )
 
-    metrics = [
-        ("Episodes", f"{total:,}"),
-        (
-            "Unplanned Readmissions",
-            f"{positives:,}",
-        ),
-        (
-            "Unplanned Readmission Rate",
-            f"{rate:.2f}%",
-        ),
-        (
-            "Average LOS",
-            (
-                f"{df['length_of_stay_days'].mean():.1f} "
-                "days"
-            ),
-        ),
-        (
-            "Avg Previous Hospitalizations",
-            (
-                f"{df['previous_hospitalizations'].mean():.2f}"
-            ),
-        ),
-        (
-            "Avg Admissions (Last 365 Days)",
-            (
-                f"{df['admissions_last_365d'].mean():.2f}"
-            ),
-        ),
-        (
-            "Avg Previous Unplanned Readmissions",
-            (
-                f"{df['previous_unplanned_readmissions'].mean():.2f}"
-            ),
-        ),
+    hospital = hospital[
+        hospital["episodes"] >= min_episodes
     ]
+
+    hospital = hospital.sort_values(
+        "rate",
+        ascending=False
+    )
+
+    return hospital
+
+
+def prepare_monthly(df):
+
+    monthly = (
+        df.groupby("admission_month")
+        .agg(
+            episodes=(get_target_column(df), "count"),
+            readmissions=(get_target_column(df), "sum")
+        )
+        .reset_index()
+    )
+
+    monthly["rate"] = (
+        monthly["readmissions"]
+        / monthly["episodes"]
+        * 100
+    )
+
+    return monthly.sort_values("admission_month")
+
+
+def prepare_quarterly(df):
+
+    quarterly = (
+        df.groupby(
+            ["admission_year", "admission_quarter"]
+        )
+        .agg(
+            episodes=(get_target_column(df), "count"),
+            readmissions=(get_target_column(df), "sum")
+        )
+        .reset_index()
+    )
+
+    quarterly["rate"] = (
+        quarterly["readmissions"]
+        / quarterly["episodes"]
+        * 100
+    )
+
+    quarterly["quarter"] = (
+        quarterly["admission_year"].astype(str)
+        + " Q"
+        + quarterly["admission_quarter"].astype(str)
+    )
+
+    return quarterly
+
+
+# ==========================================================
+# KPI Cards
+# ==========================================================
+
+def show_kpi_cards(df):
+
+    total_episodes = len(df)
+
+    readmissions = int(
+        df[get_target_column(df)].sum()
+    )
+
+    readmission_rate = (
+        readmissions
+        / total_episodes
+        * 100
+        if total_episodes > 0
+        else 0
+    )
+
+    avg_los = (
+        df["length_of_stay_days"]
+        .dropna()
+        .mean()
+    )
+
+    avg_previous = (
+        df["previous_hospitalizations"]
+        .mean()
+    )
+
+    avg_last365 = (
+        df["admissions_last_365d"]
+        .mean()
+    )
+
+    avg_previous_readm = (
+        df["previous_readmissions"]
+        .mean()
+    )
+
+    missing_discharge = (
+        df["missing_discharge"]
+        .sum()
+    )
 
     st.subheader("Overview")
 
-    for start in range(0, len(metrics), 4):
-        columns = st.columns(4)
+    c1, c2, c3, c4 = st.columns(4)
 
-        for column, metric in zip(
-            columns,
-            metrics[start:start + 4],
-        ):
-            column.metric(*metric)
+    with c1:
+        st.metric(
+            "Episodes",
+            f"{total_episodes:,}"
+        )
+
+    with c2:
+        st.metric(
+            "Readmissions",
+            f"{readmissions:,}"
+        )
+
+    with c3:
+        st.metric(
+            "Readmission Rate",
+            f"{readmission_rate:.2f}%"
+        )
+
+    with c4:
+        st.metric(
+            "Average LOS",
+            f"{avg_los:.1f} days"
+        )
+
+    c5, c6, c7, c8 = st.columns(4)
+
+    with c5:
+        st.metric(
+            "Previous Hospitalizations",
+            f"{avg_previous:.2f}"
+        )
+
+    with c6:
+        st.metric(
+            "Admissions Last 365 Days",
+            f"{avg_last365:.2f}"
+        )
+
+    with c7:
+        st.metric(
+            "Previous Readmissions",
+            f"{avg_previous_readm:.2f}"
+        )
+
+    with c8:
+        st.metric(
+            "Missing Discharge",
+            f"{missing_discharge:,}"
+        )
 
     st.divider()
 
+    # ==========================================================
+# Readmission Rate by Specialty
+# ==========================================================
 
-def plot_specialty_rate(
-    df: pd.DataFrame,
-    min_episodes: int = 100,
-    top_n: int = 20,
-) -> None:
-    if not _has_columns(
-        df,
-        "especialidade",
-        TARGET_COLUMN,
-    ):
-        return
+def plot_specialty_rate(df, min_episodes=100, top_n=20):
 
-    _bar_rate(
-        prepare_specialty(
-            df,
-            min_episodes,
-        ),
-        "especialidade",
-        "Unplanned Readmission Rate by Specialty",
-        "Specialty",
-        top_n,
-        df[TARGET_COLUMN].mean() * 100,
-        650,
+    specialty = prepare_specialty(df, min_episodes)
+
+    overall_rate = (
+        df[get_target_column(df)].mean()
+        * 100
     )
 
-
-def plot_hospital_rate(
-    df: pd.DataFrame,
-    min_episodes: int = 100,
-    top_n: int = 20,
-) -> None:
-    if not _has_columns(
-        df,
-        "executante",
-        TARGET_COLUMN,
-    ):
-        return
-
-    _bar_rate(
-        prepare_hospital(
-            df,
-            min_episodes,
-        ),
-        "executante",
-        "Unplanned Readmission Rate by Hospital",
-        "Hospital",
-        top_n,
-        df[TARGET_COLUMN].mean() * 100,
-        650,
-    )
-
-
-def plot_monthly_trend(
-    df: pd.DataFrame,
-) -> None:
-    if not _has_columns(
-        df,
-        "admission_month",
-        TARGET_COLUMN,
-    ):
-        return
-
-    data = prepare_monthly(df)
-
-    fig = px.line(
-        data,
-        x="admission_month",
-        y="rate",
-        markers=True,
-        title="Monthly Unplanned Readmission Rate",
+    fig = px.bar(
+        specialty.head(top_n),
+        x="rate",
+        y="especialidade",
+        orientation="h",
+        text="episodes",
+        title="Readmission Rate by Specialty",
         labels={
-            "admission_month": "Month",
-            "rate":
-                "Unplanned readmission rate (%)",
-        },
-        hover_data={
-            "episodes": ":,",
-            "readmissions": ":,",
-            "rate": ":.2f",
-        },
+            "rate": "Readmission Rate (%)",
+            "especialidade": "Specialty"
+        }
     )
 
     fig.update_traces(
+        textposition="outside",
+        marker_color="#3157D5",
+        marker_line_width=0,
+    )
+
+    fig.add_vline(
+        x=overall_rate,
+        line_dash="dash",
+        annotation_text=f"Overall ({overall_rate:.1f}%)"
+    )
+
+    fig.update_layout(
+        yaxis={"categoryorder": "total ascending"},
+    )
+    apply_chart_theme(fig, 650)
+
+    fig.update_layout(
+        paper_bgcolor="#FFFFFF",
+        plot_bgcolor="#FFFFFF",
+    )
+    show_chart(fig)
+
+
+# ==========================================================
+# Readmission Rate by Hospital
+# ==========================================================
+
+def plot_hospital_rate(df, min_episodes=100, top_n=20):
+
+    hospital = prepare_hospital(df, min_episodes)
+
+    overall_rate = (
+        df[get_target_column(df)].mean()
+        * 100
+    )
+
+    fig = px.bar(
+        hospital.head(top_n),
+        x="rate",
+        y="executante",
+        orientation="h",
+        text="episodes",
+        title="Readmission Rate by Hospital",
+        labels={
+            "rate": "Readmission Rate (%)",
+            "executante": "Hospital"
+        }
+    )
+
+    fig.update_traces(
+        textposition="outside",
+        marker_color="#477FC2",
+        marker_line_width=0,
+    )
+
+    fig.add_vline(
+        x=overall_rate,
+        line_dash="dash",
+        annotation_text=f"Overall ({overall_rate:.1f}%)"
+    )
+
+    fig.update_layout(
+        yaxis={"categoryorder": "total ascending"},
+    )
+    apply_chart_theme(fig, 650)
+
+    fig.update_layout(
+        paper_bgcolor="#FFFFFF",
+        plot_bgcolor="#FFFFFF",
+    )
+    show_chart(fig)
+
+
+# ==========================================================
+# Monthly Trend
+# ==========================================================
+
+def plot_monthly_trend(df):
+
+    monthly = prepare_monthly(df)
+
+    fig = px.line(
+        monthly,
+        x="admission_month",
+        y="rate",
+        markers=True,
+        title="Monthly Readmission Rate",
+        labels={
+            "admission_month": "Month",
+            "rate": "Readmission Rate (%)"
+        }
+    )
+
+    fig.update_traces(
+        line_color="#3157D5",
         line_width=3,
-        marker_size=7,
+        marker_color="#3157D5",
+        marker_line_color="#FFFFFF",
+        marker_line_width=1.5,
+        marker_size=8,
     )
 
     fig.update_layout(
         hovermode="x unified",
-        height=500,
     )
+    apply_chart_theme(fig, 500)
 
-    apply_chart_font(fig)
-
-    st.plotly_chart(
-        fig,
-        use_container_width=True,
+    fig.update_layout(
+        paper_bgcolor="#FFFFFF",
+        plot_bgcolor="#FFFFFF",
     )
+    show_chart(fig)
 
 
-def plot_quarterly_trend(
-    df: pd.DataFrame,
-) -> None:
-    if not _has_columns(
-        df,
-        "admission_year",
-        "admission_quarter",
-        TARGET_COLUMN,
-    ):
-        return
+# ==========================================================
+# Quarterly Trend
+# ==========================================================
 
-    data = prepare_quarterly(df)
+def plot_quarterly_trend(df):
+
+    quarterly = prepare_quarterly(df)
 
     fig = px.bar(
-        data,
+        quarterly,
         x="quarter",
         y="rate",
         text="episodes",
-        title="Quarterly Unplanned Readmission Rate",
+        title="Quarterly Readmission Rate",
         labels={
             "quarter": "Quarter",
-            "rate":
-                "Unplanned readmission rate (%)",
-        },
-        hover_data={
-            "episodes": ":,",
-            "readmissions": ":,",
-            "rate": ":.2f",
-        },
+            "rate": "Readmission Rate (%)"
+        }
     )
 
     fig.update_traces(
-        texttemplate="%{text:,}",
         textposition="outside",
+        marker_color="#6F91E4",
+        marker_line_width=0,
     )
 
     fig.update_layout(
         xaxis_tickangle=-45,
-        height=500,
     )
+    apply_chart_theme(fig, 500)
 
-    apply_chart_font(fig)
-
-    st.plotly_chart(
-        fig,
-        use_container_width=True,
+    fig.update_layout(
+        paper_bgcolor="#FFFFFF",
+        plot_bgcolor="#FFFFFF",
     )
+    show_chart(fig)
 
+    # ==========================================================
+# Length of Stay Distribution
+# ==========================================================
 
-def plot_los_distribution(
-    df: pd.DataFrame,
-) -> None:
-    if not _has_columns(
-        df,
-        "length_of_stay_days",
-        TARGET_COLUMN,
-    ):
+def plot_los_distribution(df):
+
+    if "length_of_stay_days" not in df.columns:
+        st.info("Column length_of_stay_days not found.")
         return
 
-    data = df[
+    los_df = df[
         df["length_of_stay_days"].notna()
         & (df["length_of_stay_days"] >= 0)
     ].copy()
 
-    if data.empty:
-        st.info("No valid length-of-stay data.")
+    if los_df.empty:
+        st.info("No valid length of stay data available.")
         return
 
-    data = data[
-        data["length_of_stay_days"]
-        <= data["length_of_stay_days"].quantile(
-            0.99
-        )
+    upper_limit = los_df["length_of_stay_days"].quantile(0.99)
+
+    los_df = los_df[
+        los_df["length_of_stay_days"] <= upper_limit
     ]
 
-    data["status"] = (
-        data[TARGET_COLUMN]
-        .map({
-            0: "No unplanned readmission",
-            1: "Unplanned readmission",
-        })
+    readmission_los = (
+        los_df[los_df[get_target_column(df)] == 1]
+        .groupby("length_of_stay_days")
+        .size()
+        .reset_index(name="readmissions")
     )
 
     fig = px.histogram(
-        data,
+        los_df,
         x="length_of_stay_days",
-        color="status",
         nbins=50,
-        barmode="overlay",
-        opacity=1,
-        category_orders={
-            "status": [
-                "No unplanned readmission",
-                "Unplanned readmission",
-            ]
-        },
-        title="Length of Stay Distribution",
+        title="Length of Stay Distribution and Readmissions",
         labels={
-            "length_of_stay_days": "Length of stay (days)",
-            "count": "Episodes",
-            "status": "Outcome",
+            "length_of_stay_days": "Length of Stay (days)",
+            "count": "Episodes"
         },
+        opacity=0.78,
     )
 
-    traces = {
-        trace.name: trace
-        for trace in fig.data
-    }
-
-    fig.data = (
-        traces["No unplanned readmission"],
-        traces["Unplanned readmission"],
+    fig.update_traces(
+        marker_color="#BCD0F6",
+        marker_line_color="#FFFFFF",
+        marker_line_width=0.5,
     )
 
-    fig.update_layout(height=500)
-
-    apply_chart_font(fig)
-
-    st.plotly_chart(
-        fig,
-        use_container_width=True,
+    fig_line = go.Scatter(
+        x=readmission_los["length_of_stay_days"],
+        y=readmission_los["readmissions"],
+        name="Readmissions",
+        mode="lines+markers",
+        yaxis="y2",
+        line=dict(color="#5A86E8", width=3),
+        marker=dict(color="#5A86E8", size=7),
     )
 
+    fig.add_trace(fig_line)
 
-def plot_los_vs_readmission(
-    df: pd.DataFrame,
-) -> None:
-    if not _has_columns(
-        df,
-        "length_of_stay_days",
-        TARGET_COLUMN,
-    ):
+    fig.update_layout(
+        yaxis=dict(title="Episodes"),
+        yaxis2=dict(
+            title="Readmissions",
+            overlaying="y",
+            side="right"
+        ),
+        height=500,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1
+        )
+    )
+
+    show_chart(fig)
+
+
+# ==========================================================
+# LOS vs Readmission
+# ==========================================================
+
+def plot_los_vs_readmission(df):
+
+    if "length_of_stay_days" not in df.columns:
+        st.info("Column length_of_stay_days not found.")
         return
 
-    data = (
-        df.groupby(TARGET_COLUMN)
+    los = (
+        df.groupby(get_target_column(df))
         ["length_of_stay_days"]
         .mean()
         .reset_index()
     )
 
-    data["status"] = (
-        data[TARGET_COLUMN]
-        .map({
-            0: "No unplanned readmission",
-            1: "Unplanned readmission",
-        })
-    )
-
     fig = px.bar(
-        data,
-        x="status",
+        los,
+        x=get_target_column(df),
         y="length_of_stay_days",
         text="length_of_stay_days",
-        title=(
-            "Average Length of Stay by "
-            "Unplanned Readmission Status"
-        ),
+        title="Average Length of Stay by Readmission Status",
         labels={
-            "status": "Outcome",
-            "length_of_stay_days":
-                "Average length of stay (days)",
-        },
+            get_target_column(df): "Readmitted in 30 days",
+            "length_of_stay_days": "Average LOS (days)"
+        }
     )
 
     fig.update_traces(
         texttemplate="%{text:.1f}",
-        textposition="outside",
+        textposition="outside"
     )
 
-    fig.update_layout(height=500)
+    apply_chart_theme(fig, 500)
 
-    apply_chart_font(fig)
-
-    st.plotly_chart(
-        fig,
-        use_container_width=True,
-    )
+    show_chart(fig)
 
 
-def plot_icd_codes(
-    df: pd.DataFrame,
-    top_n: int = 20,
-) -> None:
-    if not _has_columns(
-        df,
-        "codigocid",
-        TARGET_COLUMN,
-    ):
-        return
+# ==========================================================
+# ICD Codes
+# ==========================================================
 
-    data = (
-        df[
-            (df[TARGET_COLUMN] == 1)
-            & df["codigocid"].notna()
-        ]
+def plot_icd_codes(df, top_n=20):
+
+    icd = (
+        df[df[get_target_column(df)] == 1]
         .groupby("codigocid")
         .size()
-        .reset_index(
-            name="unplanned_readmissions"
-        )
-        .sort_values(
-            "unplanned_readmissions",
-            ascending=False,
-        )
+        .reset_index(name="readmissions")
+        .sort_values("readmissions", ascending=False)
         .head(top_n)
     )
 
-    if data.empty:
+    if icd.empty:
         st.info("No ICD data available.")
         return
 
     fig = px.bar(
-        data,
-        x="unplanned_readmissions",
+        icd,
+        x="readmissions",
         y="codigocid",
         orientation="h",
-        text="unplanned_readmissions",
-        title=(
-            "Top ICD Codes Associated with "
-            "Unplanned Readmissions"
-        ),
+        text="readmissions",
+        title="Top ICD Codes Associated with Readmissions",
         labels={
-            "unplanned_readmissions":
-                "Unplanned readmissions",
-            "codigocid": "ICD code",
-        },
+            "readmissions": "Readmissions",
+            "codigocid": "ICD Code"
+        }
     )
 
-    fig.update_traces(
-        texttemplate="%{text:,}",
-        textposition="outside",
-    )
+    fig.update_traces(textposition="outside", marker_color="#5A86E8", marker_line_width=0)
 
     fig.update_layout(
-        yaxis={
-            "categoryorder": "total ascending",
-            "title": None,
-        },
-        height=600,
+        yaxis={"categoryorder": "total ascending"},
+        height=600
     )
 
-    apply_chart_font(fig)
+    show_chart(fig)
 
-    st.plotly_chart(
-        fig,
-        use_container_width=True,
-    )
 
+# ==========================================================
+# Discharge Reason
+# ==========================================================
 
 def plot_discharge_reason(
     df: pd.DataFrame,
-    min_episodes: int = 100,
+    min_episodes: int = 100
 ) -> None:
-    if not _has_columns(
-        df,
+    """
+    Readmission rate by discharge reason.
+    """
+
+    df = enrich_discharge_columns(df)
+
+    required_columns = {
         "motivoalta",
-        TARGET_COLUMN,
-    ):
+        get_target_column(df),
+        "eligible_for_readmission_model"
+    }
+
+    if not required_columns.issubset(df.columns):
+        st.info(
+            "Discharge reason data is not available "
+            "in the dashboard dataset."
+        )
         return
 
-    _bar_rate(
-        _rate_table(
-            df,
-            "motivoalta",
-            min_episodes,
-        ).sort_values(
-            "rate",
-            ascending=True,
-        ),
-        "motivoalta",
-        (
-            "Unplanned Readmission Rate "
-            "by Discharge Reason"
-        ),
-        "Discharge reason",
-        height=450,
+    eligible_df = df[
+        df["eligible_for_readmission_model"] == 1
+    ].copy()
+
+    discharge = (
+        eligible_df
+        .assign(
+            motivoalta=eligible_df["motivoalta"]
+            .fillna("Não informado")
+        )
+        .groupby("motivoalta", dropna=False)
+        .agg(
+            episodes=(
+                get_target_column(eligible_df),
+                "size"
+            ),
+            readmissions=(
+                get_target_column(eligible_df),
+                "sum"
+            )
+        )
+        .reset_index()
     )
 
+    discharge = discharge[
+        discharge["episodes"] >= min_episodes
+    ].copy()
 
-def plot_discharge_reason_distribution(
-    df: pd.DataFrame,
-) -> None:
-    if not _has_columns(
-        df,
-        "motivoalta",
-    ):
+    if discharge.empty:
+        st.info(
+            "No eligible discharge reasons satisfy "
+            "the minimum episode filter."
+        )
         return
 
-    data = (
-        df.assign(
-            motivoalta=df["motivoalta"]
-            .fillna("Not informed")
-        )
-        .groupby(
-            "motivoalta",
-            dropna=False,
-        )
-        .size()
-        .reset_index(name="episodes")
-        .sort_values(
-            "episodes",
-            ascending=True,
-        )
+    discharge["rate"] = (
+        discharge["readmissions"]
+        / discharge["episodes"]
+        * 100
+    )
+
+    discharge = discharge.sort_values(
+        "rate",
+        ascending=True
     )
 
     fig = px.bar(
-        data,
-        x="episodes",
+        discharge,
+        x="rate",
         y="motivoalta",
         orientation="h",
         text="episodes",
         title=(
-            "Distribution of Discharge Reasons "
-            "among Eligible Episodes"
+            "Readmission Rate by Eligible "
+            "Discharge Reason"
         ),
         labels={
-            "episodes": "Episodes",
+            "rate": "Readmission rate (%)",
             "motivoalta": "Discharge reason",
+            "episodes": "Episodes",
+            "readmissions": "Readmissions"
         },
+        hover_data={
+            "episodes": ":,",
+            "readmissions": ":,",
+            "rate": ":.2f"
+        }
     )
 
     fig.update_traces(
         texttemplate="%{text:,}",
-        textposition="outside",
+        textposition="outside"
     )
 
     fig.update_layout(
         height=450,
-        yaxis_title=None,
+        yaxis_title=None
     )
 
-    apply_chart_font(fig)
+    fig.update_layout(
+        paper_bgcolor="#FFFFFF",
+        plot_bgcolor="#FFFFFF",
+    )
+    show_chart(fig)
 
-    st.plotly_chart(
-        fig,
-        use_container_width=True,
+    st.caption(
+        "Episodes ending in death, transfer, or without "
+        "a valid discharge date are not included because "
+        "they are not eligible to originate a future "
+        "readmission."
     )
 
-
-def plot_heatmap(
-    df: pd.DataFrame,
-    min_episodes: int = 100,
+def plot_discharge_reason_distribution(
+    df: pd.DataFrame
 ) -> None:
-    if not _has_columns(
-        df,
-        "executante",
-        "especialidade",
-        TARGET_COLUMN,
-    ):
+    """
+    Distribution of discharge reasons.
+    """
+
+    df = enrich_discharge_columns(df)
+
+    if "motivoalta" not in df.columns:
+        st.info("Column motivoalta not found.")
         return
+
+    discharge_distribution = (
+        df.assign(
+            motivoalta=df["motivoalta"]
+            .fillna("Não informado")
+        )
+        .groupby("motivoalta", dropna=False)
+        .size()
+        .reset_index(name="episodes")
+        .sort_values(
+            "episodes",
+            ascending=True
+        )
+    )
+
+    if discharge_distribution.empty:
+        st.info(
+            "No discharge reason data available."
+        )
+        return
+
+    fig = px.bar(
+        discharge_distribution,
+        x="episodes",
+        y="motivoalta",
+        orientation="h",
+        text="episodes",
+        title="Distribution of Discharge Reasons",
+        labels={
+            "episodes": "Episodes",
+            "motivoalta": "Discharge reason"
+        }
+    )
+
+    fig.update_traces(
+        texttemplate="%{text:,}",
+        textposition="outside"
+    )
+
+    fig.update_layout(
+        height=500,
+        yaxis_title=None
+    )
+
+    fig.update_layout(
+        paper_bgcolor="#FFFFFF",
+        plot_bgcolor="#FFFFFF",
+    )
+    show_chart(fig)
+
+def plot_model_eligibility(
+    df: pd.DataFrame
+) -> None:
+
+    if "eligible_for_readmission_model" not in df.columns:
+        st.info(
+            "Eligibility column not found."
+        )
+        return
+
+    eligibility = (
+        df["eligible_for_readmission_model"]
+        .map({
+            1: "Eligible",
+            0: "Not eligible"
+        })
+        .fillna("Unknown")
+        .value_counts()
+        .rename_axis("status")
+        .reset_index(name="episodes")
+    )
+
+    if eligibility.empty:
+        st.info("No eligibility data available.")
+        return
+
+    fig = px.pie(
+        eligibility,
+        names="status",
+        values="episodes",
+        hole=0.45,
+        title="Eligibility for Readmission Prediction"
+    )
+
+    fig.update_traces(
+        textinfo="percent+label",
+        hovertemplate=(
+            "%{label}<br>"
+            "Episodes: %{value:,}<br>"
+            "Percentage: %{percent}"
+            "<extra></extra>"
+        )
+    )
+
+    fig.update_layout(
+        paper_bgcolor="#FFFFFF",
+        plot_bgcolor="#FFFFFF",
+    )
+    show_chart(fig)
+
+def plot_non_eligible_reasons(
+    df: pd.DataFrame
+) -> None:
+
+    required_columns = {
+        "eligible_for_readmission_model",
+        "motivoalta",
+        "discharge_ts"
+    }
+
+    if not required_columns.issubset(df.columns):
+        st.info(
+            "Required columns for model eligibility "
+            "chart were not found."
+        )
+        return
+
+    excluded_df = df[
+        df["eligible_for_readmission_model"] == 0
+    ].copy()
+
+    if excluded_df.empty:
+        st.info(
+            "No non-eligible episodes found."
+        )
+        return
+
+    excluded_df["exclusion_reason"] = "Other"
+
+    excluded_df.loc[
+        excluded_df["motivoalta"].eq("Óbito"),
+        "exclusion_reason"
+    ] = "Death"
+
+    excluded_df.loc[
+        excluded_df["motivoalta"].eq("Transferência"),
+        "exclusion_reason"
+    ] = "Transfer"
+
+    excluded_df.loc[
+        excluded_df["discharge_ts"].isna(),
+        "exclusion_reason"
+    ] = "Missing discharge"
+
+    exclusion_summary = (
+        excluded_df
+        .groupby("exclusion_reason")
+        .size()
+        .reset_index(name="episodes")
+        .sort_values(
+            "episodes",
+            ascending=True
+        )
+    )
+
+    fig = px.bar(
+        exclusion_summary,
+        x="episodes",
+        y="exclusion_reason",
+        orientation="h",
+        text="episodes",
+        title="Reasons for Model Ineligibility",
+        labels={
+            "episodes": "Episodes",
+            "exclusion_reason": "Reason"
+        }
+    )
+
+    fig.update_traces(
+        texttemplate="%{text:,}",
+        textposition="outside"
+    )
+
+    fig.update_layout(
+        yaxis_title=None
+    )
+
+    fig.update_layout(
+        paper_bgcolor="#FFFFFF",
+        plot_bgcolor="#FFFFFF",
+    )
+    show_chart(fig)
+    
+# ==========================================================
+# Heatmap Hospital x Specialty
+# ==========================================================
+
+def plot_heatmap(df, min_episodes=100):
+
+    heatmap = (
+        df.groupby(["executante", "especialidade"])
+        .agg(
+            episodes=(get_target_column(df), "count"),
+            readmissions=(get_target_column(df), "sum")
+        )
+        .reset_index()
+    )
+
+    heatmap = heatmap[
+        heatmap["episodes"] >= min_episodes
+    ]
+
+    if heatmap.empty:
+        st.info("No data available for heatmap.")
+        return
+
+    heatmap["rate"] = (
+        heatmap["readmissions"]
+        / heatmap["episodes"]
+        * 100
+    )
 
     top_hospitals = (
         df["executante"]
@@ -783,161 +1122,216 @@ def plot_heatmap(
         .index
     )
 
-    data = (
-        df[
-            df["executante"].isin(
-                top_hospitals
-            )
-            & df["especialidade"].isin(
-                top_specialties
-            )
-        ]
-        .groupby(
-            [
-                "executante",
-                "especialidade",
-            ]
-        )
-        .agg(
-            episodes=(TARGET_COLUMN, "size"),
-            readmissions=(TARGET_COLUMN, "sum"),
-        )
-        .reset_index()
-    )
+    heatmap = heatmap[
+        heatmap["executante"].isin(top_hospitals)
+        & heatmap["especialidade"].isin(top_specialties)
+    ]
 
-    data = data[
-        data["episodes"] >= min_episodes
-    ].copy()
-
-    if data.empty:
-        st.info("No data available for heatmap.")
-        return
-
-    data["rate"] = (
-        data["readmissions"]
-        / data["episodes"]
-        * 100
-    )
-
-    pivot = data.pivot(
+    pivot = heatmap.pivot(
         index="executante",
         columns="especialidade",
-        values="rate",
-    )
+        values="rate"
+    ).fillna(0)
 
     fig = px.imshow(
         pivot,
         aspect="auto",
-        title=(
-            "Unplanned Readmission Rate: "
-            "Hospital × Specialty"
-        ),
-        labels={
-            "x": "Specialty",
-            "y": "Hospital",
-            "color": "Rate (%)",
-        },
-    )
-
-    fig.update_layout(height=700)
-
-    apply_chart_font(fig)
-
-    st.plotly_chart(
-        fig,
-        use_container_width=True,
-    )
-
-
-def plot_previous_hospitalizations(
-    df: pd.DataFrame,
-) -> None:
-    if not _has_columns(
-        df,
-        "previous_hospitalizations",
-        TARGET_COLUMN,
-    ):
-        return
-
-    data = (
-        _rate_table(
-            df,
-            "previous_hospitalizations",
+        zmin=0,
+        color_continuous_scale=LIGHT_HEATMAP,
+        title="Readmission Rate Heatmap: Hospital x Specialty",
+        labels=dict(
+            x="Specialty",
+            y="Hospital",
+            color="Rate (%)"
         )
-        .sort_values(
-            "previous_hospitalizations"
-        )
-        .head(30)
-    )
-
-    fig = px.line(
-        data,
-        x="previous_hospitalizations",
-        y="rate",
-        markers=True,
-        title=(
-            "Unplanned Readmission Rate vs "
-            "Previous Hospitalizations"
-        ),
-        labels={
-            "previous_hospitalizations":
-                "Previous hospitalizations",
-            "rate":
-                "Unplanned readmission rate (%)",
-        },
-        hover_data={
-            "episodes": ":,",
-            "readmissions": ":,",
-            "rate": ":.2f",
-        },
     )
 
     fig.update_traces(
+        hovertemplate=(
+            "Hospital: %{y}<br>"
+            "Specialty: %{x}<br>"
+            "Rate: %{z:.2f}%"
+            "<extra></extra>"
+        )
+    )
+
+    apply_chart_theme(fig, 700)
+
+    show_chart(fig)
+
+# ==========================================================
+# Previous Hospitalizations
+# ==========================================================
+
+def plot_previous_hospitalizations(df):
+
+    history = (
+        df.groupby("previous_hospitalizations")
+        .agg(
+            episodes=(get_target_column(df), "count"),
+            readmissions=(get_target_column(df), "sum")
+        )
+        .reset_index()
+    )
+
+    history["rate"] = (
+        history["readmissions"]
+        / history["episodes"]
+        * 100
+    )
+
+    history = history.sort_values(
+        "previous_hospitalizations"
+    ).head(30)
+
+    fig = px.line(
+        history,
+        x="previous_hospitalizations",
+        y="rate",
+        markers=True,
+        title="Readmission Rate vs Previous Hospitalizations",
+        labels={
+            "previous_hospitalizations": "Previous Hospitalizations",
+            "rate": "Readmission Rate (%)"
+        }
+    )
+
+    fig.update_traces(
+        line_color="#6F91E4",
         line_width=3,
-        marker_size=7,
+        marker_color="#5A86E8",
+        marker_size=8,
     )
 
-    fig.update_layout(height=500)
+    apply_chart_theme(fig, 500)
 
-    apply_chart_font(fig)
+    show_chart(fig)
 
-    st.plotly_chart(
-        fig,
-        use_container_width=True,
+def plot_discharge_outcomes(df):
+
+    if "motivoalta" not in df.columns:
+        st.info("Column motivoalta not found.")
+        return
+
+    outcomes = (
+        df.assign(
+            motivoalta=df["motivoalta"]
+            .fillna("Não informado")
+        )
+        .groupby("motivoalta")
+        .size()
+        .reset_index(name="episodes")
+        .sort_values(
+            "episodes",
+            ascending=False
+        )
     )
 
+    if outcomes.empty:
+        st.info("No discharge outcome data available.")
+        return
 
-def plot_discharge_outcomes(
-    df: pd.DataFrame,
-) -> None:
-    plot_discharge_reason_distribution(df)
-
-
-def plot_model_eligibility(
-    df: pd.DataFrame,
-) -> None:
-    st.info(
-        "ml_features already contains only "
-        "eligible episodes."
+    fig = px.bar(
+        outcomes,
+        x="episodes",
+        y="motivoalta",
+        orientation="h",
+        text="episodes",
+        title="Hospital Episodes by Discharge Outcome",
+        labels={
+            "episodes": "Episodes",
+            "motivoalta": "Discharge outcome"
+        }
     )
 
-
-def plot_non_eligible_reasons(
-    df: pd.DataFrame,
-) -> None:
-    st.info(
-        "Non-eligible episodes are not included "
-        "in ml_features."
+    fig.update_traces(
+        textposition="outside"
     )
 
+    fig.update_layout(
+        yaxis={
+            "categoryorder": "total ascending"
+        },
+        height=500
+    )
+
+    fig.update_layout(
+        paper_bgcolor="#FFFFFF",
+        plot_bgcolor="#FFFFFF",
+    )
+    show_chart(fig)
 
 def plot_deaths_by_hospital(
-    df: pd.DataFrame,
-    min_episodes: int = 100,
-    top_n: int = 20,
-) -> None:
-    st.info(
-        "Deaths are not included in ml_features "
-        "because they are not eligible to originate "
-        "a future readmission."
+    df,
+    min_episodes=100,
+    top_n=20
+):
+
+    hospital_summary = (
+        df.groupby("executante")
+        .agg(
+            episodes=(
+                "motivoalta",
+                "count"
+            ),
+            deaths=(
+                "motivoalta",
+                lambda values: (
+                    values == "Óbito"
+                ).sum()
+            )
+        )
+        .reset_index()
     )
+
+    hospital_summary = hospital_summary[
+        hospital_summary["episodes"]
+        >= min_episodes
+    ].copy()
+
+    hospital_summary["death_rate"] = (
+        hospital_summary["deaths"]
+        / hospital_summary["episodes"]
+        * 100
+    )
+
+    hospital_summary = (
+        hospital_summary
+        .sort_values(
+            "death_rate",
+            ascending=False
+        )
+        .head(top_n)
+    )
+
+    if hospital_summary.empty:
+        st.info(
+            "No hospitals satisfy the minimum episode filter."
+        )
+        return
+
+    fig = px.bar(
+        hospital_summary,
+        x="death_rate",
+        y="executante",
+        orientation="h",
+        text="episodes",
+        title="In-Hospital Mortality by Hospital",
+        labels={
+            "death_rate": "Mortality (%)",
+            "executante": "Hospital"
+        }
+    )
+
+    fig.update_traces(
+        textposition="outside"
+    )
+
+    fig.update_layout(
+        yaxis={
+            "categoryorder": "total ascending"
+        },
+        height=600
+    )
+
+    show_chart(fig)

@@ -31,7 +31,7 @@ DATASETS = {
         "key": "A_baseline",
         "path": MODEL_DIR / "a_baseline.parquet",
     },
-    "B — Trajetória completa": {
+    "B — Full trajectory": {
         "key": "B_trajectory",
         "path": MODEL_DIR / "b_trajectory.parquet",
     },
@@ -47,6 +47,57 @@ MODELS = {
     "CatBoost": "catboost",
 }
 
+
+def tr(key, **kwargs):
+    """Return an English UI string."""
+    translations = {
+        "page_title": "Interpretability analysis",
+        "page_description": "SHAP analysis of tuned models using the official temporal validation set.",
+        "language": "Language",
+        "dataset": "Dataset",
+        "dataset_a": "A — Baseline",
+        "dataset_b": "B — Full trajectory",
+        "dataset_c": "C — Primary care",
+        "temporal_validation": "Temporal validation",
+        "shap_sample": "SHAP sample: {sample:,} observations out of {total:,} in validation.",
+        "generate": "Generate SHAP for all 3 models",
+        "calculating": "Calculating SHAP values and interactions...",
+        "status": "Status",
+        "generated_success": "Interpretability results generated successfully.",
+        "global_comparison": "Global comparison",
+        "interaction_comparison": "Interaction comparison",
+        "no_model": "No model could be processed.",
+        "model": "Model for visualization",
+        "features_displayed": "Number of features displayed",
+        "missing_results": "Generate the SHAP results above to visualize this model and dataset.",
+        "global_importance": "Global feature importance",
+        "mean_shap": "Mean |SHAP| importance",
+        "feature": "Feature",
+        "global_caption": "Mean |SHAP| represents the average magnitude of each feature's contribution to model predictions. Higher values indicate greater influence, but do not by themselves indicate whether the contribution increases or decreases predicted risk.",
+        "dependence": "Dependence of the main features",
+        "dependence_caption": "Select one of the main features to explore how different values relate to its contribution to the prediction. Points above zero indicate a contribution toward higher predicted risk; points below zero indicate a contribution toward lower predicted risk. The observed relationship represents an association with the model prediction, not a causal effect.",
+        "dependence_select": "Feature for dependence analysis",
+        "interactions": "Main feature interactions",
+        "interaction_caption": "Interaction importance represents the combined behavior of the two features in the prediction. It does not represent causality.",
+        "interaction": "Interaction",
+        "importance": "Importance",
+        "mean_interaction": "Mean interaction",
+        "no_interactions": "No interaction results available for this model and dataset.",
+        "feature_value": "Feature value",
+        "low": "Low",
+        "high": "High",
+        "outside_limit": "Outside visual limit",
+        "yes": "Yes",
+        "no": "No",
+        "shap_value": "SHAP value",
+        "contribution_risk": "Feature contribution to predicted risk",
+        "each_point": "Each point represents one observation from the SHAP sample.",
+        "positive_negative": "Positive SHAP values increase predicted unplanned readmission risk; negative values decrease it.",
+        "color_caption": "Color represents the relative feature value (blue = low; red = high).",
+        "visual_limit": "For readability, the horizontal axis is limited to the central 99% of SHAP values; extreme values are not removed and are identified in the hover information.",
+        "not_causal": "The interpretation does not represent causality.",
+    }
+    return translations[key].format(**kwargs)
 
 # =============================================================================
 # Dados e modelos
@@ -69,7 +120,7 @@ def load_dataset(dataset_key):
     path = dataset_info["path"]
 
     if not path.exists():
-        raise FileNotFoundError(f"Dataset não encontrado: {path}")
+        raise FileNotFoundError(f"Dataset not found: {path}")
 
     df = pd.read_parquet(path)
     df["admission_ts"] = pd.to_datetime(
@@ -79,7 +130,7 @@ def load_dataset(dataset_key):
 
     if df["admission_ts"].isna().any():
         raise ValueError(
-            f"{dataset_key}: admission_ts contém valores inválidos."
+            f"{dataset_key}: admission_ts contains invalid values."
         )
 
     return df
@@ -94,7 +145,7 @@ def load_model(dataset_key, model_key):
 
     if not model_path.exists():
         raise FileNotFoundError(
-            f"Modelo não encontrado: {model_path}"
+            f"Model not found: {model_path}"
         )
 
     return joblib.load(model_path)
@@ -116,14 +167,14 @@ def get_validation_data(dataset_key):
 
     if validation_df.empty:
         raise ValueError(
-            f"{dataset_key}: conjunto de validação vazio."
+            f"{dataset_key}: validation set is empty."
         )
 
     target = "unplanned_readmitted_30d"
 
     if target not in validation_df.columns:
         raise ValueError(
-            f"{dataset_key}: coluna alvo '{target}' não encontrada."
+            f"{dataset_key}: target column '{target}' not found."
         )
 
     y_valid = pd.to_numeric(
@@ -133,7 +184,7 @@ def get_validation_data(dataset_key):
 
     if y_valid.isna().any():
         raise ValueError(
-            f"{dataset_key}: target contém valores ausentes."
+            f"{dataset_key}: target contains missing values."
         )
 
     y_valid = y_valid.astype(int)
@@ -661,9 +712,9 @@ def plot_global_importance(importance, top_n):
         orientation="h",
         labels={
             "mean_abs_shap": "Mean |SHAP value|",
-            "feature": "Variável",
+            "feature": "Feature",
         },
-        title=f"Top {top_n} variáveis por importância SHAP",
+        title=f"Top {top_n} features by SHAP importance",
     )
 
     fig.update_layout(
@@ -680,49 +731,88 @@ def plot_global_importance(importance, top_n):
 
 
 def _numeric_color_values(values):
-    """Convert a feature column into numeric values for SHAP-style coloring."""
+    """Map feature values to a 0-1 relative scale for SHAP-style coloring."""
     series = pd.Series(values)
 
     if pd.api.types.is_numeric_dtype(series):
         numeric = pd.to_numeric(series, errors="coerce")
         if numeric.notna().any():
-            return numeric.fillna(numeric.median()).to_numpy(dtype=float)
+            numeric = numeric.fillna(numeric.median()).to_numpy(dtype=float)
+        else:
+            return np.full(len(series), 0.5, dtype=float)
+    else:
+        codes, _ = pd.factorize(
+            series.astype("string").fillna("missing"),
+            sort=True,
+        )
+        numeric = codes.astype(float)
 
-    codes, _ = pd.factorize(
-        series.astype("string").fillna("missing"),
-        sort=True,
-    )
-    return codes.astype(float)
+    if len(numeric) == 0:
+        return numeric
+
+    minimum = np.nanmin(numeric)
+    maximum = np.nanmax(numeric)
+
+    if maximum == minimum:
+        return np.full(len(numeric), 0.5, dtype=float)
+
+    return (numeric - minimum) / (maximum - minimum)
 
 
 def _jitter_positions(values, seed=42):
-    """Create deterministic vertical jitter so points form a beeswarm-like cloud."""
+    """Create deterministic vertical jitter for a beeswarm-like cloud."""
     rng = np.random.RandomState(seed)
     values = np.asarray(values, dtype=float)
+
     if len(values) == 0:
         return values
 
-    order = np.argsort(values)
-    ranks = np.empty(len(values), dtype=float)
-    ranks[order] = np.arange(len(values), dtype=float)
-    if len(values) == 1:
-        return rng.normal(0, 0.04, size=1)
+    # Bin SHAP values horizontally so points with similar effects
+    # spread vertically instead of forming a simple diagonal rank.
+    finite = np.isfinite(values)
+    jitter = np.zeros(len(values), dtype=float)
 
-    centered = (ranks / (len(values) - 1)) - 0.5
-    return centered * 0.55 + rng.normal(0, 0.035, size=len(values))
+    if finite.sum() == 0:
+        return rng.normal(0, 0.08, size=len(values))
+
+    finite_values = values[finite]
+    if np.ptp(finite_values) == 0:
+        jitter[finite] = rng.normal(0, 0.08, size=finite.sum())
+        return jitter
+
+    n_bins = max(8, min(30, int(np.sqrt(finite.sum()))))
+    bins = np.linspace(
+        finite_values.min(),
+        finite_values.max(),
+        n_bins + 1,
+    )
+
+    bin_ids = np.digitize(finite_values, bins[1:-1], right=False)
+
+    for bin_id in np.unique(bin_ids):
+        positions = np.where(finite)[0][bin_ids == bin_id]
+        if len(positions) == 1:
+            jitter[positions[0]] = rng.normal(0, 0.025)
+        else:
+            offsets = np.linspace(-0.26, 0.26, len(positions))
+            offsets += rng.normal(0, 0.018, size=len(positions))
+            jitter[positions] = offsets
+
+    return jitter
 
 
 def plot_shap_beeswarm(
     shap_values,
     X_display,
     top_features,
+    x_quantile=0.99,
 ):
-    """Create a SHAP beeswarm-style plot using the aggregated original features.
+    """Create a clean SHAP beeswarm-style plot.
 
-    The project aggregates encoded SHAP values back to the original feature level.
-    This visualization therefore recreates the SHAP beeswarm semantics while
-    preserving categorical variables that cannot be passed directly to
-    shap.plots.beeswarm.
+    The x-axis is visually limited to the central distribution so that
+    extreme SHAP outliers do not compress the rest of the observations.
+    Outliers are not removed from the underlying data; only their display
+    position is clipped to the plotting range.
     """
     selected = top_features["feature"].tolist()
     selected = [
@@ -734,47 +824,99 @@ def plot_shap_beeswarm(
     if not selected:
         return go.Figure()
 
-    # SHAP beeswarm convention: most important feature at the top.
+    # SHAP convention: most important feature at the top.
     y_labels = list(reversed(selected))
     fig = go.Figure()
 
+    all_shap = []
+    for feature in selected:
+        feature_index = X_display.columns.get_loc(feature)
+        all_shap.extend(
+            np.asarray(
+                shap_values[:, feature_index],
+                dtype=float,
+            )[np.isfinite(shap_values[:, feature_index])]
+        )
+
+    all_shap = np.asarray(all_shap, dtype=float)
+
+    if len(all_shap) > 0:
+        limit = max(
+            float(np.quantile(np.abs(all_shap), x_quantile)),
+            1e-6,
+        )
+    else:
+        limit = 1.0
+
+    # Keep zero centered and use a symmetric visual range.
+    x_limit = limit * 1.05
+
     for y_index, feature in enumerate(y_labels):
         feature_index = X_display.columns.get_loc(feature)
+
         shap_column = np.asarray(
             shap_values[:, feature_index],
             dtype=float,
         )
+
         feature_values = X_display[feature].to_numpy()
         color_values = _numeric_color_values(feature_values)
 
-        jitter = _jitter_positions(
+        display_shap = np.clip(
             shap_column,
+            -limit,
+            limit,
+        )
+
+        jitter = _jitter_positions(
+            display_shap,
             seed=RANDOM_STATE + y_index,
         )
 
+        customdata = np.column_stack([
+            np.asarray(feature_values, dtype=object),
+            shap_column,
+            np.where(
+                np.abs(shap_column) > limit,
+                tr("yes"),
+                tr("no"),
+            ),
+        ])
+
         fig.add_trace(
             go.Scatter(
-                x=shap_column,
-                y=np.full(len(shap_column), y_index) + jitter,
+                x=display_shap,
+                y=np.full(len(display_shap), y_index) + jitter,
                 mode="markers",
                 name=feature,
                 showlegend=False,
                 marker={
-                    "size": 7,
+                    "size": 6,
                     "opacity": 0.72,
                     "color": color_values,
-                    "colorscale": "RdBu_r",
-                    "showscale": False,
+                    "colorscale": [
+                        [0.0, "#2166AC"],
+                        [0.5, "#F7F7F7"],
+                        [1.0, "#B2182B"],
+                    ],
+                    "cmin": 0,
+                    "cmax": 1,
+                    "showscale": y_index == len(y_labels) - 1,
+                    "colorbar": {
+                        "title": "Feature value",
+                        "tickvals": [0, 1],
+                        "ticktext": ["Low", "High"],
+                        "len": 0.75,
+                    } if y_index == len(y_labels) - 1 else None,
                     "line": {"width": 0},
                 },
-                customdata=np.column_stack([
-                    np.asarray(feature_values, dtype=object),
-                    shap_column,
-                ]),
+                customdata=customdata,
                 hovertemplate=(
                     f"<b>{feature}</b><br>"
                     "Valor: %{customdata[0]}<br>"
-                    "SHAP: %{customdata[1]:.4f}<extra></extra>"
+                    "SHAP: %{customdata[1]:.4f}<br>"
+                    "Outside visual limit: %{customdata[2]}"
+                    "<extra></extra>"
                 ),
             )
         )
@@ -790,28 +932,126 @@ def plot_shap_beeswarm(
         tickmode="array",
         tickvals=list(range(len(y_labels))),
         ticktext=y_labels,
-        title="Variável",
+        title="Feature",
         showgrid=False,
+        range=[-0.7, len(y_labels) - 0.3],
     )
+
     fig.update_xaxes(
-        title="Impacto SHAP",
+        title=tr("shap_value"),
         zeroline=False,
+        range=[-x_limit, x_limit],
     )
 
     fig.update_layout(
-        height=max(520, len(selected) * 42),
+        height=max(500, len(selected) * 42),
         margin=dict(
             l=10,
             r=20,
-            t=60,
-            b=20,
+            t=75,
+            b=55,
         ),
-        title="SHAP beeswarm — impacto das variáveis na predição",
+        title=(
+            "SHAP beeswarm — feature contributions "
+            "para o risco previsto"
+        ),
         hovermode="closest",
     )
 
     return fig
 
+
+def plot_shap_dependence(
+    shap_values,
+    X_display,
+    feature,
+):
+    """Plot SHAP dependence for one feature."""
+    if feature not in X_display.columns:
+        return go.Figure()
+
+    feature_index = X_display.columns.get_loc(feature)
+    x_values = X_display[feature]
+    y_values = np.asarray(
+        shap_values[:, feature_index],
+        dtype=float,
+    )
+
+    if not pd.api.types.is_numeric_dtype(x_values):
+        codes, labels = pd.factorize(
+            x_values.astype("string").fillna("missing"),
+            sort=True,
+        )
+        x_plot = codes.astype(float)
+        x_tickvals = list(range(len(labels)))
+        x_ticktext = [str(label) for label in labels]
+    else:
+        x_plot = pd.to_numeric(
+            x_values,
+            errors="coerce",
+        ).to_numpy(dtype=float)
+        x_tickvals = None
+        x_ticktext = None
+
+    mask = np.isfinite(x_plot) & np.isfinite(y_values)
+
+    fig = go.Figure(
+        go.Scatter(
+            x=x_plot[mask],
+            y=y_values[mask],
+            mode="markers",
+            marker={
+                "size": 6,
+                "opacity": 0.55,
+                "color": x_plot[mask],
+                "colorscale": [
+                    [0.0, "#2166AC"],
+                    [0.5, "#F7F7F7"],
+                    [1.0, "#B2182B"],
+                ],
+                "showscale": False,
+                "line": {"width": 0},
+            },
+            customdata=np.asarray(
+                x_values[mask],
+                dtype=object,
+            ),
+            hovertemplate=(
+                f"<b>{feature}</b><br>"
+                "Valor: %{customdata}<br>"
+                "SHAP: %{y:.4f}<extra></extra>"
+            ),
+        )
+    )
+
+    fig.add_hline(
+        y=0,
+        line_width=1,
+        line_dash="dash",
+        line_color="gray",
+    )
+
+    fig.update_layout(
+        height=350,
+        margin=dict(
+            l=10,
+            r=20,
+            t=55,
+            b=45,
+        ),
+        title=f"SHAP dependence — {feature}",
+        xaxis_title=feature,
+        yaxis_title=tr("shap_value"),
+    )
+
+    if x_tickvals is not None:
+        fig.update_xaxes(
+            tickmode="array",
+            tickvals=x_tickvals,
+            ticktext=x_ticktext,
+        )
+
+    return fig
 
 def plot_interaction_importance(
     interactions,
@@ -835,10 +1075,10 @@ def plot_interaction_importance(
         y="interaction",
         orientation="h",
         labels={
-            "interaction_importance": "Importância da interação",
-            "interaction": "Combinação de variáveis",
+            "interaction_importance": "Interaction importance",
+            "interaction": "Feature combination",
         },
-        title="Principais interações entre variáveis",
+        title="Main feature interactions",
     )
 
     fig.update_layout(
@@ -929,7 +1169,7 @@ def run_all_models(dataset_key, X_sample):
             statuses.append(
                 {
                     "model": model_name,
-                    "status": "Concluído",
+                    "status": "Completed",
                     "global_file": str(
                         result["global_file"]
                     ),
@@ -982,28 +1222,30 @@ def run_all_models(dataset_key, X_sample):
 # Interface
 # =============================================================================
 def show_interpretability():
-    st.header("Interpretabilidade")
+    dataset_options = {
+        tr("dataset_a"): "A_baseline",
+        tr("dataset_b"): "B_trajectory",
+        tr("dataset_c"): "C_aps",
+    }
 
-    st.markdown(
-        "Análise SHAP dos modelos tunados utilizando "
-        "a validação temporal oficial."
-    )
+    st.header(tr("page_title"))
+    st.markdown(tr("page_description"))
 
     dataset_label = st.selectbox(
-        "Conjunto de dados",
-        list(DATASETS.keys()),
+        tr("dataset"),
+        list(dataset_options.keys()),
         index=1,
     )
 
-    dataset_key = DATASETS[dataset_label]["key"]
+    dataset_key = dataset_options[dataset_label]
 
     train_cutoff, validation_cutoff = (
         load_official_cutoffs()
     )
 
     st.info(
-        f"Validação temporal: "
-        f"{train_cutoff.date()} até "
+        f"{tr('temporal_validation')}: "
+        f"{train_cutoff.date()} to "
         f"{validation_cutoff.date()}."
     )
 
@@ -1017,16 +1259,19 @@ def show_interpretability():
     )
 
     st.write(
-        f"Amostra SHAP: {len(X_sample):,} observações "
-        f"de um total de {len(X_valid):,} na validação."
+        tr(
+            "shap_sample",
+            sample=len(X_sample),
+            total=len(X_valid),
+        )
     )
 
     if st.button(
-        "Gerar SHAP para os 3 modelos",
+        tr("generate"),
         type="primary",
     ):
         with st.spinner(
-            "Calculando SHAP e interações..."
+            tr("calculating")
         ):
             (
                 results,
@@ -1038,7 +1283,7 @@ def show_interpretability():
                 X_sample,
             )
 
-        st.subheader("Status")
+        st.subheader(tr("status"))
         st.dataframe(
             pd.DataFrame(statuses),
             width="stretch",
@@ -1047,35 +1292,34 @@ def show_interpretability():
 
         if results:
             st.success(
-                "Resultados de interpretabilidade "
-                "gerados com sucesso."
+                tr("generated_success")
             )
 
             st.write(
-                f"Comparação global: `{comparison_file}`"
+                f"{tr('global_comparison')}: `{comparison_file}`"
             )
             st.write(
-                f"Comparação de interações: "
+                f"Interaction comparison: "
                 f"`{interaction_comparison_file}`"
             )
         else:
             st.error(
-                "Nenhum modelo pôde ser processado."
+                tr("no_model")
             )
 
     st.divider()
 
     model_name = st.selectbox(
-        "Modelo para visualização",
+        tr("model"),
         list(MODELS.keys()),
         index=1,
     )
 
     top_n = st.slider(
-        "Número de variáveis exibidas",
+        tr("features_displayed"),
         5,
-        20,
         15,
+        10,
     )
 
     model_key = MODELS[model_name]
@@ -1096,8 +1340,7 @@ def show_interpretability():
 
     if not global_file.exists() or not shap_file.exists():
         st.info(
-            "Gere os resultados SHAP acima para "
-            "visualizar este modelo e conjunto."
+            tr("missing_results")
         )
         return
 
@@ -1148,7 +1391,7 @@ def show_interpretability():
         )
     ].copy()
 
-    st.subheader("Importância global")
+    st.subheader(tr("global_importance"))
 
     c1, c2 = st.columns(2)
 
@@ -1171,24 +1414,62 @@ def show_interpretability():
             hide_index=True,
         )
 
-    st.subheader("Impacto das variáveis")
+    st.subheader(tr("global_importance"))
+
+    importance_plot = importance.head(top_n).copy()
+    importance_plot = importance_plot.sort_values(
+        "mean_abs_shap",
+        ascending=True,
+    )
+
+    fig_importance = go.Figure(
+        go.Bar(
+            x=importance_plot["mean_abs_shap"],
+            y=importance_plot["feature"],
+            orientation="h",
+            hovertemplate=(
+                "<b>%{y}</b><br>"
+                "Mean |SHAP|: %{x:.4f}<extra></extra>"
+            ),
+        )
+    )
+
+    fig_importance.update_layout(
+        height=max(450, len(importance_plot) * 38),
+        margin=dict(l=10, r=20, t=25, b=45),
+        xaxis_title=tr("mean_shap"),
+        yaxis_title=tr("feature"),
+    )
 
     st.plotly_chart(
-        plot_shap_beeswarm(
-            shap_values,
-            X_display,
-            importance.head(top_n),
-        ),
+        fig_importance,
         width="stretch",
     )
 
-    st.caption(
-        "Cada ponto representa uma observação da amostra SHAP. "
-        "Valores SHAP positivos aumentam a previsão de "
-        "readmissão não planejada; valores negativos reduzem "
-        "a previsão. A posição horizontal representa o impacto "
-        "SHAP e a dispersão vertical mostra a distribuição das "
-        "observações. A interpretação não representa causalidade."
+    st.caption(tr("global_caption"))
+
+    st.subheader(tr("dependence"))
+
+    dependence_features = importance.head(
+        min(5, top_n)
+    )["feature"].tolist()
+
+    st.caption(tr("dependence_caption"))
+
+    selected_dependence_feature = st.selectbox(
+        tr("dependence_select"),
+        dependence_features,
+        index=0,
+        key=f"dependence_feature_{dataset_key}_{model_key}",
+    )
+
+    st.plotly_chart(
+        plot_shap_dependence(
+            shap_values,
+            X_display,
+            selected_dependence_feature,
+        ),
+        width="stretch",
     )
 
     interaction_file = (
@@ -1203,11 +1484,11 @@ def show_interpretability():
 
         st.divider()
         st.subheader(
-            "Principais interações entre variáveis"
+            "Main feature interactions"
         )
 
         interaction_top_n = st.slider(
-            "Número de interações exibidas",
+            "Number of interactions displayed",
             5,
             15,
             10,
@@ -1223,16 +1504,15 @@ def show_interpretability():
         )
 
         st.caption(
-            "A importância representa o comportamento "
-            "combinado das duas variáveis na previsão. "
-            "Não representa causalidade."
+            "Interaction importance represents the combined behavior of the two features in the prediction. "
+            "It does not represent causality."
         )
 
         display_interactions = interactions.head(
             interaction_top_n
         ).copy()
 
-        display_interactions["Interação"] = (
+        display_interactions[tr("interaction")] = (
             display_interactions["feature_1"]
             + " × "
             + display_interactions["feature_2"]
@@ -1241,14 +1521,14 @@ def show_interpretability():
         st.dataframe(
             display_interactions[
                 [
-                    "Interação",
+                    tr("interaction"),
                     "interaction_importance",
                     "mean_interaction",
                 ]
             ].rename(
                 columns={
-                    "interaction_importance": "Importância",
-                    "mean_interaction": "Interação média",
+                    "interaction_importance": tr("importance"),
+                    "mean_interaction": "Mean interaction",
                 }
             ).round(5),
             width="stretch",
@@ -1256,8 +1536,7 @@ def show_interpretability():
         )
     else:
         st.info(
-            "Gere os resultados SHAP acima para "
-            "calcular as interações entre variáveis."
+            "Generate the SHAP results above to calculate feature interactions."
         )
 
 
